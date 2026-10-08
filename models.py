@@ -108,3 +108,28 @@ class Payment(Base):
     note        = Column(String)
     created_by  = Column(BigInteger, ForeignKey("users.id"))
     is_void     = Column(Boolean, nullable=False, default=False)
+
+
+class CommissiondarLoan(Base):
+    __tablename__ = "commissiondar_loans"
+
+    id               = Column(BigInteger, primary_key=True)
+    commissiondar_id = Column(BigInteger, ForeignKey("parties.id"), nullable=False)
+    farmer_id        = Column(BigInteger, ForeignKey("parties.id"), nullable=False)
+    principal        = Column(Numeric(14, 2), nullable=False)
+    interest_rate_pa = Column(Numeric(5, 2), nullable=False, default=0)
+    issued_at        = Column(DateTime, server_default=func.now())
+    status           = Column(String, nullable=False, default="open")
+    note             = Column(String)
+    is_void          = Column(Boolean, nullable=False, default=False)
+
+
+class CommissiondarLoanRepayment(Base):
+    __tablename__ = "commissiondar_loan_repayments"
+
+    id        = Column(BigInteger, primary_key=True)
+    loan_id   = Column(BigInteger, ForeignKey("commissiondar_loans.id"), nullable=False)
+    amount    = Column(Numeric(14, 2), nullable=False)
+    paid_at   = Column(DateTime, server_default=func.now())
+    note      = Column(String)
+    is_void   = Column(Boolean, nullable=False, default=False)
