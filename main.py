@@ -10,6 +10,7 @@ from models import (
     Party, StockMovement, LedgerEntry, Payment, User,
     CommissiondarLoan, CommissiondarLoanRepayment,
     MillCommissiondarLoan, MillCommissiondarLoanRepayment,
+    BrokerCommission,
 )
 from auth import create_access_token, get_current_user
 
@@ -34,6 +35,8 @@ class IntakeCreate(BaseModel):
     quantity: float
     rate: float
     moisture_pct: float | None = None
+    broker_id: int | None = None
+    commission_amount: float | None = None
 
 
 class PaymentCreate(BaseModel):
@@ -163,6 +166,7 @@ def record_intake(data: IntakeCreate, db: Session = Depends(get_db), current_use
         quantity=data.quantity,
         rate=data.rate,
         moisture_pct=data.moisture_pct,
+        broker_id=data.broker_id,
     )
     db.add(movement)
     db.flush()
@@ -174,12 +178,25 @@ def record_intake(data: IntakeCreate, db: Session = Depends(get_db), current_use
         movement_id=movement.id,
     )
     db.add(ledger)
+
+    commission = None
+    if data.broker_id and data.commission_amount:
+        commission = BrokerCommission(
+            business_id=current_user.business_id,
+            commissiondar_id=data.broker_id,
+            farmer_id=data.farmer_id,
+            movement_id=movement.id,
+            commission_amount=data.commission_amount,
+        )
+        db.add(commission)
+
     db.commit()
     db.refresh(movement)
     db.refresh(ledger)
+    if commission:
+        db.refresh(commission)
 
-    return {"stock_movement": movement, "ledger_entry": ledger}
-
+    return {"stock_movement": movement, "ledger_entry": ledger, "broker_commission": commission}
 
 # ---------------------------------------------------------------
 # Payments
@@ -370,3 +387,30 @@ def repay_mill_loan(data: MillRepaymentCreate, db: Session = Depends(get_db), cu
     db.commit()
     db.refresh(repayment)
     return repayment
+
+
+class CommissionPay(BaseModel):
+    commission_id: int
+
+@app.get("/api/broker-commissions")
+def list_commissions(db: Session = Depends(get_db), current_user: User = Depends(require_owner)):
+    commissions = db.query(BrokerCommission).filter(
+        BrokerCommission.business_id == current_user.business_id,
+        BrokerCommission.is_void == False
+    ).all()
+    return commissions
+
+
+@app.post("/api/broker-commissions/pay")
+def pay_commission(data: CommissionPay, db: Session = Depends(get_db), current_user: User = Depends(require_owner)):
+    commission = db.query(BrokerCommission).filter(
+        BrokerCommission.id == data.commission_id,
+        BrokerCommission.business_id == current_user.business_id
+    ).first()
+    if not commission:
+        raise HTTPException(status_code=404, detail="Commission not found")
+
+    commission.is_paid = True
+    db.commit()
+    db.refresh(commission)
+    return commission
