@@ -133,3 +133,28 @@ class CommissiondarLoanRepayment(Base):
     paid_at   = Column(DateTime, server_default=func.now())
     note      = Column(String)
     is_void   = Column(Boolean, nullable=False, default=False)
+
+    
+class MillCommissiondarLoan(Base):
+    __tablename__ = "mill_commissiondar_loans"
+
+    id               = Column(BigInteger, primary_key=True)
+    business_id      = Column(BigInteger, ForeignKey("businesses.id"), nullable=False)
+    commissiondar_id = Column(BigInteger, ForeignKey("parties.id"), nullable=False)
+    principal        = Column(Numeric(14, 2), nullable=False)
+    interest_rate_pa = Column(Numeric(5, 2), nullable=False, default=0)
+    issued_at        = Column(DateTime, server_default=func.now())
+    status           = Column(String, nullable=False, default="open")
+    note             = Column(String)
+    is_void          = Column(Boolean, nullable=False, default=False)
+
+
+class MillCommissiondarLoanRepayment(Base):
+    __tablename__ = "mill_commissiondar_loan_repayments"
+
+    id        = Column(BigInteger, primary_key=True)
+    loan_id   = Column(BigInteger, ForeignKey("mill_commissiondar_loans.id"), nullable=False)
+    amount    = Column(Numeric(14, 2), nullable=False)
+    paid_at   = Column(DateTime, server_default=func.now())
+    note      = Column(String)
+    is_void   = Column(Boolean, nullable=False, default=False)

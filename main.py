@@ -6,7 +6,11 @@ from sqlalchemy import func
 from pydantic import BaseModel
 
 from database import get_db, engine, Base
-from models import Party, StockMovement, LedgerEntry, Payment, User, CommissiondarLoan, CommissiondarLoanRepayment
+from models import (
+    Party, StockMovement, LedgerEntry, Payment, User,
+    CommissiondarLoan, CommissiondarLoanRepayment,
+    MillCommissiondarLoan, MillCommissiondarLoanRepayment,
+)
 from auth import create_access_token, get_current_user
 
 Base.metadata.create_all(bind=engine)
@@ -53,6 +57,17 @@ class RepaymentCreate(BaseModel):
     amount: float
 
 
+class MillLoanCreate(BaseModel):
+    commissiondar_id: int
+    principal: float
+    interest_rate_pa: float = 0
+
+
+class MillRepaymentCreate(BaseModel):
+    loan_id: int
+    amount: float
+
+
 # ---------------------------------------------------------------
 # Dependencies
 # ---------------------------------------------------------------
@@ -61,6 +76,12 @@ def require_commissiondar(current_user: User = Depends(get_current_user), db: Se
     party = db.query(Party).filter(Party.id == current_user.party_id).first()
     if not party or party.party_type != "commissiondar":
         raise HTTPException(status_code=403, detail="Only commissiondars can access this")
+    return current_user
+
+
+def require_owner(current_user: User = Depends(get_current_user)) -> User:
+    if current_user.role != "owner":
+        raise HTTPException(status_code=403, detail="Only the mill owner can do this")
     return current_user
 
 
@@ -281,6 +302,70 @@ def repay_loan(data: RepaymentCreate, db: Session = Depends(get_db), current_use
         raise HTTPException(status_code=404, detail="Loan not found")
 
     repayment = CommissiondarLoanRepayment(loan_id=data.loan_id, amount=data.amount)
+    db.add(repayment)
+    db.commit()
+    db.refresh(repayment)
+    return repayment
+
+
+# ---------------------------------------------------------------
+# Mill-to-commissiondar loans (mill side, visible to the mill owner only)
+# ---------------------------------------------------------------
+
+@app.post("/api/mill-loans")
+def create_mill_loan(data: MillLoanCreate, db: Session = Depends(get_db), current_user: User = Depends(require_owner)):
+    loan = MillCommissiondarLoan(
+        business_id=current_user.business_id,
+        commissiondar_id=data.commissiondar_id,
+        principal=data.principal,
+        interest_rate_pa=data.interest_rate_pa,
+    )
+    db.add(loan)
+    db.commit()
+    db.refresh(loan)
+    return loan
+
+
+@app.get("/api/mill-loans")
+def list_mill_loans(db: Session = Depends(get_db), current_user: User = Depends(require_owner)):
+    loans = db.query(MillCommissiondarLoan).filter(
+        MillCommissiondarLoan.business_id == current_user.business_id,
+        MillCommissiondarLoan.is_void == False
+    ).all()
+
+    result = []
+    for loan in loans:
+        days_elapsed = (datetime.now(timezone.utc).date() - loan.issued_at).days
+        interest = float(loan.principal) * float(loan.interest_rate_pa) / 100 * days_elapsed / 365
+
+        repaid = db.query(func.coalesce(func.sum(MillCommissiondarLoanRepayment.amount), 0)).filter(
+            MillCommissiondarLoanRepayment.loan_id == loan.id,
+            MillCommissiondarLoanRepayment.is_void == False
+        ).scalar()
+
+        result.append({
+            "id": loan.id,
+            "commissiondar_id": loan.commissiondar_id,
+            "principal": loan.principal,
+            "interest_rate_pa": loan.interest_rate_pa,
+            "interest_accrued": round(interest, 2),
+            "total_repaid": repaid,
+            "outstanding": round(float(loan.principal) + interest - float(repaid), 2),
+            "status": loan.status,
+        })
+    return result
+
+
+@app.post("/api/mill-loans/repay")
+def repay_mill_loan(data: MillRepaymentCreate, db: Session = Depends(get_db), current_user: User = Depends(require_owner)):
+    loan = db.query(MillCommissiondarLoan).filter(
+        MillCommissiondarLoan.id == data.loan_id,
+        MillCommissiondarLoan.business_id == current_user.business_id
+    ).first()
+    if not loan:
+        raise HTTPException(status_code=404, detail="Loan not found")
+
+    repayment = MillCommissiondarLoanRepayment(loan_id=data.loan_id, amount=data.amount)
     db.add(repayment)
     db.commit()
     db.refresh(repayment)
