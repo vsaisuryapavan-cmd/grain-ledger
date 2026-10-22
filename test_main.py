@@ -111,3 +111,70 @@ def test_farmer_balance_nets_correctly():
     owed_after = farmer_after["owed"]
 
     assert owed_after == owed_before + 5000 - 2000
+
+def test_export_reduces_stock_correctly():
+    token = client.post("/api/login", json={"phone": "9999999999"}).json()["access_token"]
+    headers = {"Authorization": f"Bearer {token}"}
+
+    response = client.post("/api/exports", json={
+        "buyer_id": 5,
+        "item_id": 1,
+        "quantity": 5,
+        "rate": 3000
+    }, headers=headers)
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["stock_movement"]["quantity"] == -5
+    assert data["ledger_entry"]["debit"] == 15000
+
+
+def test_profit_requires_owner():
+    token = client.post("/api/login", json={"phone": "8888888888"}).json()["access_token"]
+    headers = {"Authorization": f"Bearer {token}"}
+
+    response = client.get("/api/profit", headers=headers)
+
+    assert response.status_code == 403
+
+
+def test_commissiondar_dashboard_shape():
+    token = client.post("/api/login", json={"phone": "8888888888"}).json()["access_token"]
+    headers = {"Authorization": f"Bearer {token}"}
+
+    response = client.get("/api/commissiondar-dashboard", headers=headers)
+
+    assert response.status_code == 200
+    data = response.json()
+    assert "active_loans" in data
+    assert "total_lent_out" in data
+    assert "total_outstanding" in data
+    assert "commissions_pending" in data
+
+
+def test_commissiondar_stock_on_hand_nets_correctly():
+    token = client.post("/api/login", json={"phone": "8888888888"}).json()["access_token"]
+    headers = {"Authorization": f"Bearer {token}"}
+
+    before = client.get("/api/commissiondar-stock", headers=headers).json()["stock_on_hand"]
+
+    client.post("/api/commissiondar-stock/receive", json={
+        "farmer_id": 1, "item_id": 1, "quantity": 15, "rate": 2200
+    }, headers=headers)
+
+    client.post("/api/commissiondar-stock/deliver", json={
+        "business_id": 1, "item_id": 1, "quantity": 6, "rate": 2200
+    }, headers=headers)
+
+    after = client.get("/api/commissiondar-stock", headers=headers).json()["stock_on_hand"]
+
+    assert after == before + 15 - 6
+
+
+def test_miller_blocked_from_commissiondar_stock():
+    token = client.post("/api/login", json={"phone": "9999999999"}).json()["access_token"]
+    headers = {"Authorization": f"Bearer {token}"}
+
+    response = client.get("/api/commissiondar-stock", headers=headers)
+
+    assert response.status_code == 403
