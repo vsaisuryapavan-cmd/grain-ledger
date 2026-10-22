@@ -1,4 +1,4 @@
-from sqlalchemy import Column, BigInteger, String, Numeric, Boolean, DateTime, ForeignKey, CheckConstraint
+from sqlalchemy import Column, BigInteger, String, Numeric, Boolean, DateTime, Date, ForeignKey, CheckConstraint
 from sqlalchemy.sql import func
 from database import Base
 
@@ -86,7 +86,7 @@ class LedgerEntry(Base):
     id          = Column(BigInteger, primary_key=True)
     business_id = Column(BigInteger, ForeignKey("businesses.id"), nullable=False)
     party_id    = Column(BigInteger, ForeignKey("parties.id"), nullable=False)
-    entry_date  = Column(DateTime, server_default=func.now())
+    entry_date  = Column(Date, server_default=func.now())
     debit       = Column(Numeric(14, 2), nullable=False, default=0)
     credit      = Column(Numeric(14, 2), nullable=False, default=0)
     movement_id = Column(BigInteger, ForeignKey("stock_movements.id"))
@@ -118,7 +118,7 @@ class CommissiondarLoan(Base):
     farmer_id        = Column(BigInteger, ForeignKey("parties.id"), nullable=False)
     principal        = Column(Numeric(14, 2), nullable=False)
     interest_rate_pa = Column(Numeric(5, 2), nullable=False, default=0)
-    issued_at        = Column(DateTime, server_default=func.now())
+    issued_at        = Column(Date, server_default=func.now())   # FIXED: Date, matches schema.sql
     status           = Column(String, nullable=False, default="open")
     note             = Column(String)
     is_void          = Column(Boolean, nullable=False, default=False)
@@ -130,7 +130,7 @@ class CommissiondarLoanRepayment(Base):
     id        = Column(BigInteger, primary_key=True)
     loan_id   = Column(BigInteger, ForeignKey("commissiondar_loans.id"), nullable=False)
     amount    = Column(Numeric(14, 2), nullable=False)
-    paid_at   = Column(DateTime, server_default=func.now())
+    paid_at   = Column(Date, server_default=func.now())
     note      = Column(String)
     is_void   = Column(Boolean, nullable=False, default=False)
 
@@ -143,7 +143,7 @@ class MillCommissiondarLoan(Base):
     commissiondar_id = Column(BigInteger, ForeignKey("parties.id"), nullable=False)
     principal        = Column(Numeric(14, 2), nullable=False)
     interest_rate_pa = Column(Numeric(5, 2), nullable=False, default=0)
-    issued_at        = Column(DateTime, server_default=func.now())
+    issued_at        = Column(Date, server_default=func.now())   # Date, matches schema.sql
     status           = Column(String, nullable=False, default="open")
     note             = Column(String)
     is_void          = Column(Boolean, nullable=False, default=False)
@@ -155,9 +155,10 @@ class MillCommissiondarLoanRepayment(Base):
     id        = Column(BigInteger, primary_key=True)
     loan_id   = Column(BigInteger, ForeignKey("mill_commissiondar_loans.id"), nullable=False)
     amount    = Column(Numeric(14, 2), nullable=False)
-    paid_at   = Column(DateTime, server_default=func.now())
+    paid_at   = Column(Date, server_default=func.now())
     note      = Column(String)
     is_void   = Column(Boolean, nullable=False, default=False)
+
 
 class BrokerCommission(Base):
     __tablename__ = "broker_commissions"
@@ -171,3 +172,17 @@ class BrokerCommission(Base):
     is_paid           = Column(Boolean, nullable=False, default=False)
     created_at        = Column(DateTime(timezone=True), server_default=func.now())
     is_void           = Column(Boolean, nullable=False, default=False)
+class CommissiondarStockMovement(Base):
+    __tablename__ = "commissiondar_stock_movements"
+
+    id               = Column(BigInteger, primary_key=True)
+    commissiondar_id = Column(BigInteger, ForeignKey("parties.id"), nullable=False)
+    farmer_id        = Column(BigInteger, ForeignKey("parties.id"))
+    business_id      = Column(BigInteger, ForeignKey("businesses.id"))
+    item_id          = Column(BigInteger, ForeignKey("items.id"), nullable=False)
+    movement_type    = Column(String, nullable=False)
+    quantity         = Column(Numeric(14, 3), nullable=False)
+    rate             = Column(Numeric(12, 2))
+    movement_id      = Column(BigInteger, ForeignKey("stock_movements.id"))
+    created_at       = Column(DateTime(timezone=True), server_default=func.now())
+    is_void          = Column(Boolean, nullable=False, default=False)

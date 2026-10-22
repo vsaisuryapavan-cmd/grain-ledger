@@ -10,7 +10,7 @@ from models import (
     Party, StockMovement, LedgerEntry, Payment, User,
     CommissiondarLoan, CommissiondarLoanRepayment,
     MillCommissiondarLoan, MillCommissiondarLoanRepayment,
-    BrokerCommission,
+    BrokerCommission, CommissiondarStockMovement,
 )
 from auth import create_access_token, get_current_user
 
@@ -69,6 +69,17 @@ class MillLoanCreate(BaseModel):
 class MillRepaymentCreate(BaseModel):
     loan_id: int
     amount: float
+
+
+class ExportCreate(BaseModel):
+    buyer_id: int
+    item_id: int
+    quantity: float
+    rate: float
+
+
+class CommissionPay(BaseModel):
+    commission_id: int
 
 
 # ---------------------------------------------------------------
@@ -167,6 +178,7 @@ def record_intake(data: IntakeCreate, db: Session = Depends(get_db), current_use
         rate=data.rate,
         moisture_pct=data.moisture_pct,
         broker_id=data.broker_id,
+        created_by=current_user.id,
     )
     db.add(movement)
     db.flush()
@@ -197,6 +209,7 @@ def record_intake(data: IntakeCreate, db: Session = Depends(get_db), current_use
         db.refresh(commission)
 
     return {"stock_movement": movement, "ledger_entry": ledger, "broker_commission": commission}
+
 
 # ---------------------------------------------------------------
 # Payments
@@ -231,7 +244,38 @@ def record_payment(data: PaymentCreate, db: Session = Depends(get_db), current_u
 
 
 # ---------------------------------------------------------------
-# Dashboard
+# Exports (mill selling to buyers)
+# ---------------------------------------------------------------
+
+@app.post("/api/exports")
+def record_export(data: ExportCreate, db: Session = Depends(get_db), current_user: User = Depends(require_owner)):
+    movement = StockMovement(
+        business_id=current_user.business_id,
+        item_id=data.item_id,
+        party_id=data.buyer_id,
+        movement_type="sale",
+        quantity=-data.quantity,   # negative: stock going out
+        rate=data.rate,
+    )
+    db.add(movement)
+    db.flush()
+
+    ledger = LedgerEntry(
+        business_id=current_user.business_id,
+        party_id=data.buyer_id,
+        debit=data.quantity * data.rate,   # the buyer now owes the mill
+        movement_id=movement.id,
+    )
+    db.add(ledger)
+    db.commit()
+    db.refresh(movement)
+    db.refresh(ledger)
+
+    return {"stock_movement": movement, "ledger_entry": ledger}
+
+
+# ---------------------------------------------------------------
+# Dashboard + profit (miller only)
 # ---------------------------------------------------------------
 
 @app.get("/api/dashboard")
@@ -258,6 +302,40 @@ def dashboard(business_id: int = 1, db: Session = Depends(get_db)):
         "total_stock": total_stock,
         "total_owed": total_owed,
         "today_intake": today_intake,
+    }
+
+
+@app.get("/api/profit")
+def profit_summary(db: Session = Depends(get_db), current_user: User = Depends(require_owner)):
+    revenue = db.query(func.coalesce(func.sum(StockMovement.quantity * StockMovement.rate), 0)).filter(
+        StockMovement.business_id == current_user.business_id,
+        StockMovement.movement_type == "sale",
+        StockMovement.is_void == False
+    ).scalar()
+
+    cost = db.query(func.coalesce(func.sum(StockMovement.quantity * StockMovement.rate), 0)).filter(
+        StockMovement.business_id == current_user.business_id,
+        StockMovement.movement_type == "purchase",
+        StockMovement.is_void == False
+    ).scalar()
+
+    commissions_paid = db.query(func.coalesce(func.sum(BrokerCommission.commission_amount), 0)).filter(
+        BrokerCommission.business_id == current_user.business_id,
+        BrokerCommission.is_paid == True,
+        BrokerCommission.is_void == False
+    ).scalar()
+
+    revenue = abs(float(revenue))   # sale quantity is stored negative, flip it for a clean revenue number
+    cost = float(cost)
+    commissions_paid = float(commissions_paid)
+
+    profit = revenue - cost - commissions_paid
+
+    return {
+        "revenue": round(revenue, 2),
+        "cost_of_paddy": round(cost, 2),
+        "commissions_paid": round(commissions_paid, 2),
+        "profit": round(profit, 2),
     }
 
 
@@ -288,7 +366,7 @@ def list_my_loans(db: Session = Depends(get_db), current_user: User = Depends(re
 
     result = []
     for loan in loans:
-        days_elapsed = (datetime.now(timezone.utc).date() - loan.issued_at.date()).days
+        days_elapsed = (datetime.now(timezone.utc).date() - loan.issued_at).days
         interest = float(loan.principal) * float(loan.interest_rate_pa) / 100 * days_elapsed / 365
 
         repaid = db.query(func.coalesce(func.sum(CommissiondarLoanRepayment.amount), 0)).filter(
@@ -323,6 +401,39 @@ def repay_loan(data: RepaymentCreate, db: Session = Depends(get_db), current_use
     db.commit()
     db.refresh(repayment)
     return repayment
+
+
+@app.get("/api/commissiondar-dashboard")
+def commissiondar_dashboard(db: Session = Depends(get_db), current_user: User = Depends(require_commissiondar)):
+    loans = db.query(CommissiondarLoan).filter(
+        CommissiondarLoan.commissiondar_id == current_user.party_id,
+        CommissiondarLoan.is_void == False
+    ).all()
+
+    total_lent = sum(float(loan.principal) for loan in loans)
+
+    total_outstanding = 0
+    for loan in loans:
+        days_elapsed = (datetime.now(timezone.utc).date() - loan.issued_at).days
+        interest = float(loan.principal) * float(loan.interest_rate_pa) / 100 * days_elapsed / 365
+        repaid = db.query(func.coalesce(func.sum(CommissiondarLoanRepayment.amount), 0)).filter(
+            CommissiondarLoanRepayment.loan_id == loan.id,
+            CommissiondarLoanRepayment.is_void == False
+        ).scalar()
+        total_outstanding += float(loan.principal) + interest - float(repaid)
+
+    commissions_pending = db.query(func.coalesce(func.sum(BrokerCommission.commission_amount), 0)).filter(
+        BrokerCommission.commissiondar_id == current_user.party_id,
+        BrokerCommission.is_paid == False,
+        BrokerCommission.is_void == False
+    ).scalar()
+
+    return {
+        "active_loans": len(loans),
+        "total_lent_out": round(total_lent, 2),
+        "total_outstanding": round(total_outstanding, 2),
+        "commissions_pending": commissions_pending,
+    }
 
 
 # ---------------------------------------------------------------
@@ -389,8 +500,9 @@ def repay_mill_loan(data: MillRepaymentCreate, db: Session = Depends(get_db), cu
     return repayment
 
 
-class CommissionPay(BaseModel):
-    commission_id: int
+# ---------------------------------------------------------------
+# Broker commissions (mill owes commissiondar, visible to the mill owner)
+# ---------------------------------------------------------------
 
 @app.get("/api/broker-commissions")
 def list_commissions(db: Session = Depends(get_db), current_user: User = Depends(require_owner)):
@@ -414,3 +526,68 @@ def pay_commission(data: CommissionPay, db: Session = Depends(get_db), current_u
     db.commit()
     db.refresh(commission)
     return commission
+
+
+# ---------------------------------------------------------------
+# Commissiondar stock tracking (their own mini ledger, separate from the mill)
+# ---------------------------------------------------------------
+
+class CommissiondarReceive(BaseModel):
+    farmer_id: int
+    item_id: int
+    quantity: float
+    rate: float | None = None
+
+
+class CommissiondarDeliver(BaseModel):
+    business_id: int
+    item_id: int
+    quantity: float
+    rate: float
+
+
+@app.post("/api/commissiondar-stock/receive")
+def receive_from_farmer(data: CommissiondarReceive, db: Session = Depends(get_db), current_user: User = Depends(require_commissiondar)):
+    movement = CommissiondarStockMovement(
+        commissiondar_id=current_user.party_id,
+        farmer_id=data.farmer_id,
+        item_id=data.item_id,
+        movement_type="received_from_farmer",
+        quantity=data.quantity,
+        rate=data.rate,
+    )
+    db.add(movement)
+    db.commit()
+    db.refresh(movement)
+    return movement
+
+
+@app.post("/api/commissiondar-stock/deliver")
+def deliver_to_mill(data: CommissiondarDeliver, db: Session = Depends(get_db), current_user: User = Depends(require_commissiondar)):
+    movement = CommissiondarStockMovement(
+        commissiondar_id=current_user.party_id,
+        business_id=data.business_id,
+        item_id=data.item_id,
+        movement_type="delivered_to_mill",
+        quantity=-data.quantity,
+        rate=data.rate,
+    )
+    db.add(movement)
+    db.commit()
+    db.refresh(movement)
+    return movement
+
+
+@app.get("/api/commissiondar-stock")
+def my_stock(db: Session = Depends(get_db), current_user: User = Depends(require_commissiondar)):
+    on_hand = db.query(func.coalesce(func.sum(CommissiondarStockMovement.quantity), 0)).filter(
+        CommissiondarStockMovement.commissiondar_id == current_user.party_id,
+        CommissiondarStockMovement.is_void == False
+    ).scalar()
+
+    history = db.query(CommissiondarStockMovement).filter(
+        CommissiondarStockMovement.commissiondar_id == current_user.party_id,
+        CommissiondarStockMovement.is_void == False
+    ).order_by(CommissiondarStockMovement.created_at.desc()).all()
+
+    return {"stock_on_hand": on_hand, "history": history}
