@@ -89,3 +89,25 @@ def test_miller_blocked_from_commissiondar_loans():
 
     assert response.status_code == 403
     assert response.json()["detail"] == "Only commissiondars can access this"
+
+def test_farmer_balance_nets_correctly():
+    token = client.post("/api/login", json={"phone": "9999999999"}).json()["access_token"]
+    headers = {"Authorization": f"Bearer {token}"}
+
+    before = client.get("/api/farmers").json()
+    farmer_before = next(f for f in before if f["id"] == 1)
+    owed_before = farmer_before["owed"]
+
+    client.post("/api/intake", json={
+        "farmer_id": 1, "item_id": 1, "quantity": 5, "rate": 1000
+    }, headers=headers)
+
+    client.post("/api/payments", json={
+        "farmer_id": 1, "amount": 2000
+    }, headers=headers)
+
+    after = client.get("/api/farmers").json()
+    farmer_after = next(f for f in after if f["id"] == 1)
+    owed_after = farmer_after["owed"]
+
+    assert owed_after == owed_before + 5000 - 2000
