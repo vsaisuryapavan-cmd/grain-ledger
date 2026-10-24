@@ -18,7 +18,6 @@ Base.metadata.create_all(bind=engine)
 
 app = FastAPI()
 
-
 # ---------------------------------------------------------------
 # Request/response models (all BaseModel classes together)
 # ---------------------------------------------------------------
