@@ -12,6 +12,7 @@ from models import (
     CommissiondarLoan, CommissiondarLoanRepayment,
     MillCommissiondarLoan, MillCommissiondarLoanRepayment,
     BrokerCommission, CommissiondarStockMovement,
+    LoginLog, IssueReport,
 )
 from auth import create_access_token, get_current_user
 
@@ -122,14 +123,20 @@ def root():
 @app.post("/api/login")
 def login(data: LoginRequest, db: Session = Depends(get_db)):
     user = db.query(User).filter(User.phone == data.phone).first()
+
+    log = LoginLog(
+        phone=data.phone,
+        user_id=user.id if user else None,
+        success=user is not None,
+    )
+    db.add(log)
+    db.commit()
+
     if not user:
         raise HTTPException(status_code=404, detail="No account found with this phone number")
 
     token = create_access_token(user)
-    return {"access_token": token, "token_type": "bearer"}
-
-
-# ---------------------------------------------------------------
+    return {"access_token": token, "token_type": "bearer"}# ---------------------------------------------------------------
 # Farmers
 # ---------------------------------------------------------------
 
@@ -602,3 +609,31 @@ def my_stock(db: Session = Depends(get_db), current_user: User = Depends(require
     ).order_by(CommissiondarStockMovement.created_at.desc()).all()
 
     return {"stock_on_hand": on_hand, "history": history}
+
+
+class IssueReportCreate(BaseModel):
+    description: str
+
+@app.post("/api/report-issue")
+def report_issue(data: IssueReportCreate, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    issue = IssueReport(user_id=current_user.id, description=data.description)
+    db.add(issue)
+    db.commit()
+    db.refresh(issue)
+    return issue
+
+
+def require_admin(current_user: User = Depends(get_current_user)) -> User:
+    if current_user.phone != "9999999999":  # your own phone, temporary admin check
+        raise HTTPException(status_code=403, detail="Admin only")
+    return current_user
+
+
+@app.get("/api/admin/login-logs")
+def login_logs(db: Session = Depends(get_db), current_user: User = Depends(require_admin)):
+    return db.query(LoginLog).order_by(LoginLog.created_at.desc()).limit(100).all()
+
+
+@app.get("/api/admin/issues")
+def list_issues(db: Session = Depends(get_db), current_user: User = Depends(require_admin)):
+    return db.query(IssueReport).order_by(IssueReport.created_at.desc()).all()
