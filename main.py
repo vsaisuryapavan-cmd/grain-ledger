@@ -8,7 +8,7 @@ from pydantic import BaseModel
 
 from database import get_db, engine, Base
 from models import (
-    Party, StockMovement, LedgerEntry, Payment, User,
+    Party, Item, StockMovement, LedgerEntry, Payment, User,
     CommissiondarLoan, CommissiondarLoanRepayment,
     MillCommissiondarLoan, MillCommissiondarLoanRepayment,
     BrokerCommission, CommissiondarStockMovement,
@@ -189,48 +189,129 @@ def add_farmer(farmer: FarmerCreate, db: Session = Depends(get_db), current_user
 # Intake
 # ---------------------------------------------------------------
 
+
 @app.post("/api/intake")
-def record_intake(data: IntakeCreate, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
-    movement = StockMovement(
-        business_id=current_user.business_id,
-        item_id=data.item_id,
-        party_id=data.farmer_id,
-        movement_type="purchase",
-        quantity=data.quantity,
-        rate=data.rate,
-        moisture_pct=data.moisture_pct,
-        broker_id=data.broker_id,
-        created_by=current_user.id,
-    )
-    db.add(movement)
-    db.flush()
+def record_intake(
+    data: IntakeCreate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    # 1. Validate item
+    item = db.query(Item).filter(
+        Item.id == data.item_id,
+        Item.business_id == current_user.business_id,
+        Item.is_active == True
+    ).first()
 
-    ledger = LedgerEntry(
-        business_id=current_user.business_id,
-        party_id=data.farmer_id,
-        debit=data.quantity * data.rate,
-        movement_id=movement.id,
-    )
-    db.add(ledger)
-
-    commission = None
-    if data.broker_id and data.commission_amount:
-        commission = BrokerCommission(
-            business_id=current_user.business_id,
-            commissiondar_id=data.broker_id,
-            farmer_id=data.farmer_id,
-            movement_id=movement.id,
-            commission_amount=data.commission_amount,
+    if not item:
+        raise HTTPException(
+            status_code=404,
+            detail="Item not found or inactive"
         )
-        db.add(commission)
 
-    db.commit()
-    db.refresh(movement)
-    db.refresh(ledger)
-    if commission:
-        db.refresh(commission)
+    # 2. Validate farmer
+    farmer = db.query(Party).filter(
+        Party.id == data.farmer_id,
+        Party.business_id == current_user.business_id,
+        Party.party_type == "farmer",
+        Party.is_active == True
+    ).first()
 
-    return {"stock_movement": movement, "ledger_entry": ledger, "broker_commission": commission}
+    if not farmer:
+        raise HTTPException(
+            status_code=404,
+            detail="Farmer not found or inactive"
+        )
+
+    # 3. Validate optional Commissiondar
+    if data.broker_id is not None:
+        broker = db.query(Party).filter(
+            Party.id == data.broker_id,
+            Party.party_type == "commissiondar",
+            Party.is_active == True
+        ).first()
+
+        if not broker:
+            raise HTTPException(
+                status_code=404,
+                detail="Commissiondar not found or inactive"
+            )
+
+        if data.commission_amount is None:
+            raise HTTPException(
+                status_code=400,
+                detail="Commission amount is required when a broker is selected"
+            )
+
+    elif data.commission_amount is not None:
+        raise HTTPException(
+            status_code=400,
+            detail="Select a broker before entering commission amount"
+        )
+
+    try:
+        # 4. Create stock movement
+        movement = StockMovement(
+            business_id=current_user.business_id,
+            item_id=data.item_id,
+            party_id=data.farmer_id,
+            movement_type="purchase",
+            quantity=data.quantity,
+            rate=data.rate,
+            moisture_pct=data.moisture_pct,
+            broker_id=data.broker_id,
+            created_by=current_user.id,
+        )
+
+        db.add(movement)
+        db.flush()
+
+        # 5. Create ledger entry
+        ledger = LedgerEntry(
+            business_id=current_user.business_id,
+            party_id=data.farmer_id,
+            debit=data.quantity * data.rate,
+            movement_id=movement.id,
+        )
+
+        db.add(ledger)
+
+        # 6. Create broker commission if broker is selected
+        commission = None
+
+        if data.broker_id is not None:
+            commission = BrokerCommission(
+                business_id=current_user.business_id,
+                commissiondar_id=data.broker_id,
+                farmer_id=data.farmer_id,
+                movement_id=movement.id,
+                commission_amount=data.commission_amount,
+            )
+
+            db.add(commission)
+
+        # 7. Save records
+        db.commit()
+
+        db.refresh(movement)
+        db.refresh(ledger)
+
+        if commission:
+            db.refresh(commission)
+
+    except Exception:
+        db.rollback()
+        raise HTTPException(
+            status_code=500,
+            detail="Failed to record intake"
+        )
+
+    # 8. Return response
+    return {
+        "stock_movement": movement,
+        "ledger_entry": ledger,
+        "broker_commission": commission
+    }
 
 
 # ---------------------------------------------------------------
@@ -641,3 +722,29 @@ def login_logs(db: Session = Depends(get_db), current_user: User = Depends(requi
 @app.get("/api/admin/issues")
 def list_issues(db: Session = Depends(get_db), current_user: User = Depends(require_admin)):
     return db.query(IssueReport).order_by(IssueReport.created_at.desc()).all()
+
+# ---------------------------------------------------------------
+# Items / Paddy varieties
+# ---------------------------------------------------------------
+
+@app.get("/api/items")
+def list_items(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_owner)
+):
+    items = db.query(Item).filter(
+        Item.business_id == current_user.business_id,
+        Item.is_active == True
+    ).order_by(Item.name.asc()).all()
+
+    return {
+        "items": [
+            {
+                "id": item.id,
+                "name": item.name,
+                "category": item.category,
+                "unit": item.unit
+            }
+            for item in items
+        ]
+    }
