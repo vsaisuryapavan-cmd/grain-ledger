@@ -25,8 +25,8 @@ app.add_middleware(
     allow_origins=[
     "http://localhost:5173",
     "http://127.0.0.1:5173",
-    "http://localhost:5174",
-    "http://127.0.0.1:5174",
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
 ],
     allow_credentials=True,
     allow_methods=["*"],
@@ -40,7 +40,7 @@ app.add_middleware(
 class FarmerCreate(BaseModel):
     name: str
     village: str
-    business_id: int = 1
+    
 
 
 class IntakeCreate(BaseModel):
@@ -138,13 +138,18 @@ def login(data: LoginRequest, db: Session = Depends(get_db)):
         raise HTTPException(status_code=404, detail="No account found with this phone number")
 
     token = create_access_token(user)
-    return {"access_token": token, "token_type": "bearer"}# ---------------------------------------------------------------
+    return {"access_token": token, "token_type": "bearer"}
+
+# ---------------------------------------------------------------
 # Farmers
 # ---------------------------------------------------------------
 
 @app.get("/api/farmers")
-def list_farmers(db: Session = Depends(get_db)):
-    farmers = db.query(Party).filter(Party.party_type == "farmer").all()
+def list_farmers(db: Session = Depends(get_db), current_user: User = Depends(require_owner)):
+    farmers = db.query(Party).filter(
+        Party.party_type == "farmer",
+        Party.business_id == current_user.business_id,
+    ).all()
     result = []
     for farmer in farmers:
         stock = db.query(func.coalesce(func.sum(StockMovement.quantity), 0)).filter(
@@ -168,11 +173,10 @@ def list_farmers(db: Session = Depends(get_db)):
         })
     return result
 
-
 @app.post("/api/farmers")
-def add_farmer(farmer: FarmerCreate, db: Session = Depends(get_db)):
+def add_farmer(farmer: FarmerCreate, db: Session = Depends(get_db), current_user: User = Depends(require_owner)):
     new_farmer = Party(
-        business_id=farmer.business_id,
+        business_id=current_user.business_id,
         name=farmer.name,
         village=farmer.village,
         party_type="farmer",
@@ -181,8 +185,6 @@ def add_farmer(farmer: FarmerCreate, db: Session = Depends(get_db)):
     db.commit()
     db.refresh(new_farmer)
     return new_farmer
-
-
 # ---------------------------------------------------------------
 # Intake
 # ---------------------------------------------------------------
@@ -299,7 +301,9 @@ def record_export(data: ExportCreate, db: Session = Depends(get_db), current_use
 # ---------------------------------------------------------------
 
 @app.get("/api/dashboard")
-def dashboard(business_id: int = 1, db: Session = Depends(get_db)):
+def dashboard(db: Session = Depends(get_db), current_user: User = Depends(require_owner)):
+    business_id = current_user.business_id
+
     total_stock = db.query(func.coalesce(func.sum(StockMovement.quantity), 0)).filter(
         StockMovement.business_id == business_id,
         StockMovement.is_void == False
@@ -323,7 +327,6 @@ def dashboard(business_id: int = 1, db: Session = Depends(get_db)):
         "total_owed": total_owed,
         "today_intake": today_intake,
     }
-
 
 @app.get("/api/profit")
 def profit_summary(db: Session = Depends(get_db), current_user: User = Depends(require_owner)):
@@ -357,7 +360,6 @@ def profit_summary(db: Session = Depends(get_db), current_user: User = Depends(r
         "commissions_paid": round(commissions_paid, 2),
         "profit": round(profit, 2),
     }
-
 
 # ---------------------------------------------------------------
 # Commissiondar loans (farmer side, private, never business_id)

@@ -409,3 +409,101 @@ def test_report_issue_and_retrieve():
         issue["description"] == "pytest test issue"
         for issue in issues
     )
+def test_farmers_requires_owner():
+    assert client.get("/api/farmers").status_code == 401
+    headers = get_headers("8888888888")
+    assert client.get("/api/farmers", headers=headers).status_code == 403
+
+
+def test_dashboard_requires_owner():
+    assert client.get("/api/dashboard").status_code == 401
+
+
+# -------------------------
+# Invalid JWT tests
+# -------------------------
+
+def test_invalid_token_returns_401():
+    headers = {
+        "Authorization": "Bearer invalid-token"
+    }
+
+    response = client.get(
+        "/api/dashboard",
+        headers=headers
+    )
+
+    assert response.status_code == 401
+
+
+def test_token_signed_with_wrong_secret_returns_401():
+    from jose import jwt
+    from datetime import datetime, timedelta, timezone
+
+    token = jwt.encode(
+        {
+            "sub": "2",
+            "exp": datetime.now(timezone.utc)
+                  + timedelta(minutes=10)
+        },
+        "wrong-secret",
+        algorithm="HS256"
+    )
+
+    response = client.get(
+        "/api/dashboard",
+        headers={
+            "Authorization": f"Bearer {token}"
+        }
+    )
+
+    assert response.status_code == 401
+
+
+def test_expired_token_returns_401():
+    from jose import jwt
+    from datetime import datetime, timedelta, timezone
+    from auth import SECRET_KEY, ALGORITHM
+
+    token = jwt.encode(
+        {
+            "sub": "2",
+            "exp": datetime.now(timezone.utc)
+                  - timedelta(minutes=10)
+        },
+        SECRET_KEY,
+        algorithm=ALGORITHM
+    )
+
+    response = client.get(
+        "/api/dashboard",
+        headers={
+            "Authorization": f"Bearer {token}"
+        }
+    )
+
+    assert response.status_code == 401
+
+
+def test_token_without_user_id_returns_401():
+    from jose import jwt
+    from datetime import datetime, timedelta, timezone
+    from auth import SECRET_KEY, ALGORITHM
+
+    token = jwt.encode(
+        {
+            "exp": datetime.now(timezone.utc)
+                  + timedelta(minutes=10)
+        },
+        SECRET_KEY,
+        algorithm=ALGORITHM
+    )
+
+    response = client.get(
+        "/api/dashboard",
+        headers={
+            "Authorization": f"Bearer {token}"
+        }
+    )
+
+    assert response.status_code == 401
