@@ -61,6 +61,9 @@ class User(Base):
     party_id    = Column(BigInteger, ForeignKey("parties.id"))
     created_at  = Column(DateTime(timezone=True), server_default=func.now())
 
+    # Authentication
+    password_hash = Column(String(255), nullable=True)
+    second_password_hash = Column(String(255), nullable=True)
 
 class StockMovement(Base):
     __tablename__ = "stock_movements"

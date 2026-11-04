@@ -1,6 +1,26 @@
+# Environment files and secrets
 .env
+.env.*
+!.env.example
+
+# Python virtual environments
 .venv/
 venv/
+
+# Python cache
 __pycache__/
 *.py[cod]
 .pytest_cache/
+otp_manual.py
+
+setup_existing_passwords.py
+
+setup_test_passwords.py
+
+test_password.py
+
+otp_manual.py
+
+setup_existing_passwords.py
+
+setup_test_passwords.py

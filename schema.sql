@@ -12,15 +12,16 @@ CREATE TABLE businesses (
     created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
--- People who log in (owner, staff, or a farmer/customer viewing their own account)
 CREATE TABLE users (
-    id          BIGSERIAL PRIMARY KEY,
-    business_id BIGINT NOT NULL REFERENCES businesses(id),
-    name        TEXT NOT NULL,
-    phone       TEXT NOT NULL UNIQUE,          -- OTP login
-    role        TEXT NOT NULL CHECK (role IN ('owner', 'staff', 'party')),
-    party_id    BIGINT,                         -- set when role = 'party'
-    created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+    id                   BIGSERIAL PRIMARY KEY,
+    business_id          BIGINT NOT NULL REFERENCES businesses(id),
+    name                 TEXT NOT NULL,
+    phone                TEXT NOT NULL UNIQUE,
+    password_hash        VARCHAR(255),
+    second_password_hash VARCHAR(255),
+    role                 TEXT NOT NULL CHECK (role IN ('owner', 'staff', 'party')),
+    party_id             BIGINT,
+    created_at           TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
 -- Farmers, customers, suppliers, buyers: all "parties"

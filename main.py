@@ -6,7 +6,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy import func
 from pydantic import BaseModel
 
-from database import get_db, engine, Base
+from database import get_db, Base
 from models import (
     Party, Item, StockMovement, LedgerEntry, Payment, User,
     CommissiondarLoan, CommissiondarLoanRepayment,
@@ -14,10 +14,14 @@ from models import (
     BrokerCommission, CommissiondarStockMovement,
     LoginLog, IssueReport,
 )
-from auth import create_access_token, get_current_user
-
-Base.metadata.create_all(bind=engine)
-
+from auth import (
+    create_access_token,
+    get_current_user,
+    verify_password,
+    create_otp_challenge,
+    verify_otp,
+    OTP_CHALLENGES,
+)
 app = FastAPI()
 
 app.add_middleware(
@@ -61,7 +65,13 @@ class PaymentCreate(BaseModel):
 
 class LoginRequest(BaseModel):
     phone: str
+    password: str
+    second_password: str
 
+class OTPVerifyRequest(BaseModel):
+    challenge_id: str
+    otp: str
+    
 
 class LoanCreate(BaseModel):
     farmer_id: int
@@ -126,68 +136,96 @@ def root():
 def login(data: LoginRequest, db: Session = Depends(get_db)):
     user = db.query(User).filter(User.phone == data.phone).first()
 
+    if not user:
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid phone number or password"
+        )
+
+    # Verify primary password
+    if not user.password_hash or not verify_password(
+        data.password, user.password_hash
+    ):
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid phone number or password"
+        )
+
+    # Verify second password
+    if not user.second_password_hash or not verify_password(
+        data.second_password, user.second_password_hash
+    ):
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid phone number or password"
+        )
+
+    # Create OTP challenge only after both passwords are correct
+    try:
+        challenge_id = create_otp_challenge(user.id)
+    except RuntimeError:
+        raise HTTPException(
+            status_code=503,
+            detail="OTP service is not configured"
+        )
+
+    return {
+        "message": "Passwords verified. OTP required.",
+        "challenge_id": challenge_id
+    }
+
+@app.post("/api/verify-otp")
+def verify_login_otp(
+    data: OTPVerifyRequest,
+    db: Session = Depends(get_db)
+):
+    # Get the challenge before verification deletes it
+    challenge = OTP_CHALLENGES.get(data.challenge_id)
+
+    if not challenge:
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid or expired OTP"
+        )
+
+    user_id = challenge["user_id"]
+
+    # Verify OTP
+    if not verify_otp(data.challenge_id, data.otp):
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid or expired OTP"
+        )
+
+    # Find the verified user
+    user = db.query(User).filter(User.id == user_id).first()
+
+    if not user:
+        raise HTTPException(
+            status_code=401,
+            detail="User account not found"
+        )
+
+    # Record successful login
     log = LoginLog(
-        phone=data.phone,
-        user_id=user.id if user else None,
-        success=user is not None,
+        phone=user.phone,
+        user_id=user.id,
+        success=True
     )
     db.add(log)
     db.commit()
 
-    if not user:
-        raise HTTPException(status_code=404, detail="No account found with this phone number")
-
+    # Issue JWT only after successful OTP verification
     token = create_access_token(user)
-    return {"access_token": token, "token_type": "bearer"}
 
-# ---------------------------------------------------------------
-# Farmers
-# ---------------------------------------------------------------
-
-@app.get("/api/farmers")
-def list_farmers(db: Session = Depends(get_db), current_user: User = Depends(require_owner)):
-    farmers = db.query(Party).filter(
-        Party.party_type == "farmer",
-        Party.business_id == current_user.business_id,
-    ).all()
-    result = []
-    for farmer in farmers:
-        stock = db.query(func.coalesce(func.sum(StockMovement.quantity), 0)).filter(
-            StockMovement.party_id == farmer.id,
-            StockMovement.is_void == False
-        ).scalar()
-
-        balance = db.query(
-            func.coalesce(func.sum(LedgerEntry.debit - LedgerEntry.credit), 0)
-        ).filter(
-            LedgerEntry.party_id == farmer.id,
-            LedgerEntry.is_void == False
-        ).scalar()
-
-        result.append({
-            "id": farmer.id,
-            "name": farmer.name,
-            "village": farmer.village,
-            "stock": stock,
-            "owed": balance + farmer.opening_balance,
-        })
-    return result
-
-@app.post("/api/farmers")
-def add_farmer(farmer: FarmerCreate, db: Session = Depends(get_db), current_user: User = Depends(require_owner)):
-    new_farmer = Party(
-        business_id=current_user.business_id,
-        name=farmer.name,
-        village=farmer.village,
-        party_type="farmer",
-    )
-    db.add(new_farmer)
-    db.commit()
-    db.refresh(new_farmer)
-    return new_farmer
+    return {
+        "message": "Login successful",
+        "access_token": token,
+        "token_type": "bearer"
+    }
 # ---------------------------------------------------------------
 # Intake
-# ---------------------------------------------------------------
+# ---------------------------------------------------
 
 
 @app.post("/api/intake")
@@ -748,3 +786,38 @@ def list_items(
             for item in items
         ]
     }
+# ---------------------------------------------------------------
+# Farmers
+# ---------------------------------------------------------------
+
+@app.get("/api/farmers")
+def list_farmers(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_owner)
+):
+    farmers = db.query(Party).filter(
+        Party.business_id == current_user.business_id,
+        Party.party_type == "farmer",
+        Party.is_active == True
+    ).order_by(Party.name.asc()).all()
+
+    result = []
+
+    for farmer in farmers:
+        owed = db.query(
+            func.coalesce(
+                func.sum(LedgerEntry.debit - LedgerEntry.credit), 0
+            )
+        ).filter(
+            LedgerEntry.party_id == farmer.id,
+            LedgerEntry.business_id == current_user.business_id,
+            LedgerEntry.is_void == False
+        ).scalar()
+
+        result.append({
+            "id": farmer.id,
+            "name": farmer.name,
+            "owed": float(owed)
+        })
+
+    return result

@@ -1,6 +1,9 @@
 
 from fastapi.testclient import TestClient
 from main import app
+import io
+import re
+from contextlib import redirect_stdout
 
 client = TestClient(app)
 
@@ -10,16 +13,55 @@ client = TestClient(app)
 # -------------------------
 
 def get_token(phone):
-    response = client.post("/api/login", json={"phone": phone})
+    test_passwords = {
+        "9999999999": ("OwnerTest123!", "OwnerSecond123!"),
+        "8888888888": ("PartyTest123!", "PartySecond123!")
+    }
+
+    password, second_password = test_passwords[phone]
+
+    # Capture the development OTP printed by the login endpoint
+    output = io.StringIO()
+
+    with redirect_stdout(output):
+        response = client.post(
+            "/api/login",
+            json={
+                "phone": phone,
+                "password": password,
+                "second_password": second_password
+            }
+        )
+
     assert response.status_code == 200, response.text
-    assert "access_token" in response.json()
-    return response.json()["access_token"]
+
+    challenge_id = response.json()["challenge_id"]
+
+    otp_match = re.search(
+        r"\[DEVELOPMENT OTP\]\s*(\d{6})",
+        output.getvalue()
+    )
+
+    assert otp_match, "OTP was not generated"
+
+    otp = otp_match.group(1)
+
+    verify_response = client.post(
+        "/api/verify-otp",
+        json={
+            "challenge_id": challenge_id,
+            "otp": otp
+        }
+    )
+
+    assert verify_response.status_code == 200, verify_response.text
+
+    return verify_response.json()["access_token"]
 
 
 def get_headers(phone):
     token = get_token(phone)
     return {"Authorization": f"Bearer {token}"}
-
 
 # -------------------------
 # Basic API tests
@@ -35,21 +77,20 @@ def test_root():
 def test_login_fails_for_unknown_phone():
     response = client.post(
         "/api/login",
-        json={"phone": "0000000000"}
+        json={
+            "phone": "0000000000",
+            "password": "WrongTest123!",
+            "second_password": "WrongSecond123!"
+        }
     )
 
-    assert response.status_code == 404
+    assert response.status_code == 401
 
 
 def test_login_succeeds_for_real_user():
-    response = client.post(
-        "/api/login",
-        json={"phone": "9999999999"}
-    )
+    token = get_token("9999999999")
 
-    assert response.status_code == 200
-    assert "access_token" in response.json()
-
+    assert token
 
 # -------------------------
 # Intake and payment tests
@@ -341,14 +382,17 @@ def test_miller_blocked_from_commissiondar_stock():
 # -------------------------
 # Login log tests
 # -------------------------
-
 def test_failed_login_is_logged():
     response = client.post(
         "/api/login",
-        json={"phone": "0000000000"}
+        json={
+            "phone": "0000000000",
+            "password": "WrongTest123!",
+            "second_password": "WrongSecond123!"
+        }
     )
 
-    assert response.status_code == 404
+    assert response.status_code == 401
 
 
 def test_successful_login_appears_in_admin_logs():
