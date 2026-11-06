@@ -14,9 +14,10 @@ client = TestClient(app)
 
 def get_token(phone):
     test_passwords = {
-        "9999999999": ("OwnerTest123!", "OwnerSecond123!"),
-        "8888888888": ("PartyTest123!", "PartySecond123!")
-    }
+    "9999999999": ("OwnerTest123!", "OwnerSecond123!"),
+    "8888888888": ("PartyTest123!", "PartySecond123!"),
+    "7093355518": ("AdminTest123!", "AdminSecond123!")
+}
 
     password, second_password = test_passwords[phone]
 
@@ -186,7 +187,7 @@ def test_miller_blocked_from_commissiondar_loans():
     )
 
     assert response.status_code == 403
-    assert response.json()["detail"] == "Only commissiondars can access this"
+    assert response.json()["detail"] == "Only active commissiondars can access this"
 
 
 # -------------------------
@@ -396,7 +397,7 @@ def test_failed_login_is_logged():
 
 
 def test_successful_login_appears_in_admin_logs():
-    headers = get_headers("9999999999")
+    headers = get_headers("7093355518")
 
     response = client.get(
         "/api/admin/login-logs",
@@ -428,22 +429,26 @@ def test_non_admin_blocked_from_login_logs():
 # -------------------------
 
 def test_report_issue_and_retrieve():
-    headers = get_headers("9999999999")
+    # Miller submits the issue
+    miller_headers = get_headers("9999999999")
 
     response = client.post(
         "/api/report-issue",
         json={
             "description": "pytest test issue"
         },
-        headers=headers
+        headers=miller_headers
     )
 
     assert response.status_code == 200, response.text
     assert response.json()["status"] == "open"
 
+    # Admin retrieves reported issues
+    admin_headers = get_headers("7093355518")
+
     issues_response = client.get(
         "/api/admin/issues",
-        headers=headers
+        headers=admin_headers
     )
 
     assert issues_response.status_code == 200, issues_response.text
@@ -453,6 +458,7 @@ def test_report_issue_and_retrieve():
         issue["description"] == "pytest test issue"
         for issue in issues
     )
+
 def test_farmers_requires_owner():
     assert client.get("/api/farmers").status_code == 401
     headers = get_headers("8888888888")
@@ -551,3 +557,426 @@ def test_token_without_user_id_returns_401():
     )
 
     assert response.status_code == 401
+
+# -------------------------
+# Registration and Admin approval tests
+# -------------------------
+
+def _new_test_phone():
+    """Generate a unique, numeric 10-digit phone number for registration tests."""
+    import secrets
+
+    return str(3_000_000_000 + secrets.randbelow(1_000_000_000))
+
+
+def _cleanup_registered_account(phone):
+    """Remove only the account created by the current test."""
+    from database import SessionLocal
+    from models import User, Business, Party
+
+    db = SessionLocal()
+
+    try:
+        user = db.query(User).filter(User.phone == phone).first()
+
+        if user is None:
+            return
+
+        business_id = user.business_id
+        party_id = user.party_id
+
+        # Remove the user first because it may reference the Party record.
+        db.delete(user)
+        db.flush()
+
+        if party_id is not None:
+            db.query(Party).filter(Party.id == party_id).delete(
+                synchronize_session=False
+            )
+            db.flush()
+
+        # This business was created specifically by this registration test.
+        db.query(Business).filter(Business.id == business_id).delete(
+            synchronize_session=False
+        )
+
+        db.commit()
+
+    finally:
+        db.close()
+
+
+def test_miller_registration_creates_pending_account():
+    from database import SessionLocal
+    from models import User, Business
+    from auth import verify_password
+
+    phone = _new_test_phone()
+
+    try:
+        response = client.post(
+            "/api/register/miller",
+            json={
+                "name": "Pytest Miller",
+                "phone": phone,
+                "business_name": "Pytest Independent Mill",
+                "password": "MillerTest123!",
+                "second_password": "MillerSecond123!",
+            },
+        )
+
+        assert response.status_code == 201, response.text
+        assert response.json()["approval_status"] == "pending"
+
+        db = SessionLocal()
+
+        try:
+            user = db.query(User).filter(User.phone == phone).first()
+
+            assert user is not None
+            assert user.role == "owner"
+            assert user.approval_status == "pending"
+            assert user.password_hash != "MillerTest123!"
+            assert user.second_password_hash != "MillerSecond123!"
+
+            assert verify_password("MillerTest123!", user.password_hash)
+            assert verify_password(
+                "MillerSecond123!",
+                user.second_password_hash,
+            )
+
+            business = db.query(Business).filter(
+                Business.id == user.business_id
+            ).first()
+
+            assert business is not None
+            assert business.business_type == "mill"
+            assert business.name == "Pytest Independent Mill"
+
+        finally:
+            db.close()
+
+    finally:
+        _cleanup_registered_account(phone)
+
+
+def test_commissiondar_registration_creates_independent_pending_account():
+    from database import SessionLocal
+    from models import User, Business, Party
+    from auth import verify_password
+
+    phone = _new_test_phone()
+
+    try:
+        response = client.post(
+            "/api/register/commissiondar",
+            json={
+                "name": "Pytest Commissiondar",
+                "phone": phone,
+                "password": "PartyTest123!",
+                "second_password": "PartySecond123!",
+            },
+        )
+
+        assert response.status_code == 201, response.text
+        assert response.json()["approval_status"] == "pending"
+
+        db = SessionLocal()
+
+        try:
+            user = db.query(User).filter(User.phone == phone).first()
+
+            assert user is not None
+            assert user.role == "party"
+            assert user.approval_status == "pending"
+            assert user.party_id is not None
+            assert user.password_hash != "PartyTest123!"
+            assert user.second_password_hash != "PartySecond123!"
+
+            assert verify_password("PartyTest123!", user.password_hash)
+            assert verify_password(
+                "PartySecond123!",
+                user.second_password_hash,
+            )
+
+            business = db.query(Business).filter(
+                Business.id == user.business_id
+            ).first()
+
+            assert business is not None
+            assert business.business_type == "commissiondar"
+            assert business.id != 1
+
+            party = db.query(Party).filter(
+                Party.id == user.party_id
+            ).first()
+
+            assert party is not None
+            assert party.business_id == user.business_id
+            assert party.party_type == "commissiondar"
+
+        finally:
+            db.close()
+
+    finally:
+        _cleanup_registered_account(phone)
+
+
+def test_miller_registration_rejects_duplicate_phone():
+    response = client.post(
+        "/api/register/miller",
+        json={
+            "name": "Duplicate Miller",
+            "phone": "9999999999",
+            "business_name": "Duplicate Test Mill",
+            "password": "MillerTest123!",
+            "second_password": "MillerSecond123!",
+        },
+    )
+
+    assert response.status_code == 409
+
+
+def test_commissiondar_registration_rejects_duplicate_phone():
+    response = client.post(
+        "/api/register/commissiondar",
+        json={
+            "name": "Duplicate Commissiondar",
+            "phone": "8888888888",
+            "password": "PartyTest123!",
+            "second_password": "PartySecond123!",
+        },
+    )
+
+    assert response.status_code == 409
+
+
+def test_admin_can_approve_pending_miller_registration():
+    from database import SessionLocal
+    from models import User
+
+    phone = _new_test_phone()
+
+    try:
+        registration = client.post(
+            "/api/register/miller",
+            json={
+                "name": "Approval Test Miller",
+                "phone": phone,
+                "business_name": "Approval Test Mill",
+                "password": "MillerTest123!",
+                "second_password": "MillerSecond123!",
+            },
+        )
+
+        assert registration.status_code == 201, registration.text
+
+        db = SessionLocal()
+
+        try:
+            user = db.query(User).filter(User.phone == phone).first()
+            assert user is not None
+            user_id = user.id
+        finally:
+            db.close()
+
+        admin_headers = get_headers("7093355518")
+
+        approval = client.post(
+            f"/api/admin/registrations/{user_id}/approve",
+            headers=admin_headers,
+        )
+
+        assert approval.status_code == 200, approval.text
+
+        db = SessionLocal()
+
+        try:
+            user = db.query(User).filter(User.id == user_id).first()
+
+            assert user is not None
+            assert user.approval_status == "approved"
+            assert user.reviewed_by == 5
+            assert user.reviewed_at is not None
+
+        finally:
+            db.close()
+
+        # A registration that has already been reviewed cannot be reviewed again.
+        repeated_approval = client.post(
+            f"/api/admin/registrations/{user_id}/approve",
+            headers=admin_headers,
+        )
+
+        assert repeated_approval.status_code == 409
+
+    finally:
+        _cleanup_registered_account(phone)
+
+
+def test_admin_can_reject_pending_miller_registration():
+    from database import SessionLocal
+    from models import User
+
+    phone = _new_test_phone()
+
+    try:
+        registration = client.post(
+            "/api/register/miller",
+            json={
+                "name": "Rejection Test Miller",
+                "phone": phone,
+                "business_name": "Rejection Test Mill",
+                "password": "MillerTest123!",
+                "second_password": "MillerSecond123!",
+            },
+        )
+
+        assert registration.status_code == 201, registration.text
+
+        db = SessionLocal()
+
+        try:
+            user = db.query(User).filter(User.phone == phone).first()
+            assert user is not None
+            user_id = user.id
+        finally:
+            db.close()
+
+        admin_headers = get_headers("7093355518")
+
+        rejection = client.post(
+            f"/api/admin/registrations/{user_id}/reject",
+            headers=admin_headers,
+        )
+
+        assert rejection.status_code == 200, rejection.text
+
+        db = SessionLocal()
+
+        try:
+            user = db.query(User).filter(User.id == user_id).first()
+
+            assert user is not None
+            assert user.approval_status == "rejected"
+            assert user.reviewed_by == 5
+            assert user.reviewed_at is not None
+
+        finally:
+            db.close()
+
+        blocked_login = client.post(
+            "/api/login",
+            json={
+                "phone": phone,
+                "password": "MillerTest123!",
+                "second_password": "MillerSecond123!",
+            },
+        )
+
+        assert blocked_login.status_code == 403
+        assert "rejected" in blocked_login.json()["detail"].lower()
+
+    finally:
+        _cleanup_registered_account(phone)
+
+
+def test_pending_registration_cannot_login():
+    phone = _new_test_phone()
+
+    try:
+        registration = client.post(
+            "/api/register/miller",
+            json={
+                "name": "Pending Login Test",
+                "phone": phone,
+                "business_name": "Pending Login Test Mill",
+                "password": "MillerTest123!",
+                "second_password": "MillerSecond123!",
+            },
+        )
+
+        assert registration.status_code == 201, registration.text
+
+        login = client.post(
+            "/api/login",
+            json={
+                "phone": phone,
+                "password": "MillerTest123!",
+                "second_password": "MillerSecond123!",
+            },
+        )
+
+        assert login.status_code == 403
+        assert "pending" in login.json()["detail"].lower()
+
+    finally:
+        _cleanup_registered_account(phone)
+
+
+def test_admin_registration_endpoints_are_admin_only():
+    admin_headers = get_headers("7093355518")
+    miller_headers = get_headers("9999999999")
+    commissiondar_headers = get_headers("8888888888")
+
+    admin_response = client.get(
+        "/api/admin/registrations/pending",
+        headers=admin_headers,
+    )
+
+    assert admin_response.status_code == 200, admin_response.text
+
+    miller_response = client.get(
+        "/api/admin/registrations/pending",
+        headers=miller_headers,
+    )
+
+    assert miller_response.status_code == 403
+
+    commissiondar_response = client.get(
+        "/api/admin/registrations/pending",
+        headers=commissiondar_headers,
+    )
+
+    assert commissiondar_response.status_code == 403
+
+
+def test_admin_dashboard_summary_is_admin_only():
+    admin_headers = get_headers("7093355518")
+    miller_headers = get_headers("9999999999")
+    commissiondar_headers = get_headers("8888888888")
+
+    admin_response = client.get(
+        "/api/admin/dashboard-summary",
+        headers=admin_headers,
+    )
+
+    assert admin_response.status_code == 200, admin_response.text
+
+    data = admin_response.json()
+
+    assert "users" in data
+    assert "registrations" in data
+    assert "businesses" in data
+    assert "login_activity" in data
+    assert "issues" in data
+
+    assert "total_millers" in data["users"]
+    assert "total_commissiondars" in data["users"]
+    assert "approved" in data["registrations"]
+    assert "pending" in data["registrations"]
+    assert "rejected" in data["registrations"]
+
+    miller_response = client.get(
+        "/api/admin/dashboard-summary",
+        headers=miller_headers,
+    )
+
+    assert miller_response.status_code == 403
+
+    commissiondar_response = client.get(
+        "/api/admin/dashboard-summary",
+        headers=commissiondar_headers,
+    )
+
+    assert commissiondar_response.status_code == 403
