@@ -1,9 +1,17 @@
-
+import main
+import pytest
 from fastapi.testclient import TestClient
 from main import app
-import io
-import re
-from contextlib import redirect_stdout
+
+
+@pytest.fixture(autouse=True)
+def mock_msg91_verification(monkeypatch):
+    monkeypatch.setattr(
+        main,
+        "verify_msg91_access_token",
+        lambda access_token: access_token.split(":", 1)[1]
+    )
+
 
 client = TestClient(app)
 
@@ -14,44 +22,31 @@ client = TestClient(app)
 
 def get_token(phone):
     test_passwords = {
-    "9999999999": ("OwnerTest123!", "OwnerSecond123!"),
-    "8888888888": ("PartyTest123!", "PartySecond123!"),
-    "7093355518": ("AdminTest123!", "AdminSecond123!")
-}
+        "9999999999": ("OwnerTest123!", "OwnerSecond123!"),
+        "8888888888": ("PartyTest123!", "PartySecond123!"),
+        "7093355518": ("AdminTest123!", "AdminSecond123!")
+    }
 
     password, second_password = test_passwords[phone]
 
-    # Capture the development OTP printed by the login endpoint
-    output = io.StringIO()
-
-    with redirect_stdout(output):
-        response = client.post(
-            "/api/login",
-            json={
-                "phone": phone,
-                "password": password,
-                "second_password": second_password
-            }
-        )
+    response = client.post(
+        "/api/login",
+        json={
+            "phone": phone,
+            "password": password,
+            "second_password": second_password
+        }
+    )
 
     assert response.status_code == 200, response.text
 
     challenge_id = response.json()["challenge_id"]
 
-    otp_match = re.search(
-        r"\[DEVELOPMENT OTP\]\s*(\d{6})",
-        output.getvalue()
-    )
-
-    assert otp_match, "OTP was not generated"
-
-    otp = otp_match.group(1)
-
     verify_response = client.post(
         "/api/verify-otp",
         json={
             "challenge_id": challenge_id,
-            "otp": otp
+            "access_token": f"test-msg91-access-token:{phone}"
         }
     )
 
@@ -63,6 +58,7 @@ def get_token(phone):
 def get_headers(phone):
     token = get_token(phone)
     return {"Authorization": f"Bearer {token}"}
+
 
 # -------------------------
 # Basic API tests
@@ -92,6 +88,7 @@ def test_login_succeeds_for_real_user():
     token = get_token("9999999999")
 
     assert token
+
 
 # -------------------------
 # Intake and payment tests
@@ -383,6 +380,7 @@ def test_miller_blocked_from_commissiondar_stock():
 # -------------------------
 # Login log tests
 # -------------------------
+
 def test_failed_login_is_logged():
     response = client.post(
         "/api/login",
@@ -459,8 +457,10 @@ def test_report_issue_and_retrieve():
         for issue in issues
     )
 
+
 def test_farmers_requires_owner():
     assert client.get("/api/farmers").status_code == 401
+
     headers = get_headers("8888888888")
     assert client.get("/api/farmers", headers=headers).status_code == 403
 
@@ -557,6 +557,7 @@ def test_token_without_user_id_returns_401():
     )
 
     assert response.status_code == 401
+
 
 # -------------------------
 # Registration and Admin approval tests
@@ -980,3 +981,47 @@ def test_admin_dashboard_summary_is_admin_only():
     )
 
     assert commissiondar_response.status_code == 403
+
+
+def test_login_challenge_cannot_be_reused(monkeypatch):
+    # Mock MSG91 verification for this test only
+    monkeypatch.setattr(
+        main,
+        "verify_msg91_access_token",
+        lambda access_token: "9999999999"
+    )
+
+    # Step 1: Login with valid credentials
+    login_response = client.post(
+        "/api/login",
+        json={
+            "phone": "9999999999",
+            "password": "OwnerTest123!",
+            "second_password": "OwnerSecond123!"
+        }
+    )
+
+    assert login_response.status_code == 200, login_response.text
+
+    challenge_id = login_response.json()["challenge_id"]
+
+    verification_data = {
+        "challenge_id": challenge_id,
+        "access_token": "test-msg91-access-token"
+    }
+
+    # Step 2: First verification should succeed
+    first_response = client.post(
+        "/api/verify-otp",
+        json=verification_data
+    )
+
+    assert first_response.status_code == 200, first_response.text
+
+    # Step 3: Reusing the same challenge must fail
+    second_response = client.post(
+        "/api/verify-otp",
+        json=verification_data
+    )
+
+    assert second_response.status_code == 401

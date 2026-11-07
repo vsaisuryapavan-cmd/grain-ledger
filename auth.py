@@ -1,4 +1,4 @@
-
+import httpx
 import os
 from datetime import datetime, timedelta, timezone
 
@@ -28,6 +28,57 @@ def hash_password(password: str) -> str:
 
 def verify_password(plain_password: str, hashed_password: str) -> bool:
     return password_hash.verify(plain_password, hashed_password)
+
+
+
+def verify_msg91_access_token(access_token: str) -> str:
+    authkey = os.getenv("MSG91_AUTHKEY")
+
+    if not authkey:
+        raise HTTPException(
+            status_code=503,
+            detail="MSG91 authentication is not configured"
+        )
+
+    try:
+        response = httpx.post(
+            "https://control.msg91.com/api/v5/widget/verifyAccessToken",
+            json={
+                "authkey": authkey,
+                "access-token": access_token
+            },
+            headers={
+                "Accept": "application/json",
+                "Content-Type": "application/json"
+            },
+            timeout=10
+        )
+
+        response.raise_for_status()
+        result = response.json()
+
+    except (httpx.HTTPError, ValueError):
+        raise HTTPException(
+            status_code=503,
+            detail="Unable to verify OTP with MSG91"
+        )
+
+    if not isinstance(result, dict) or result.get("type") != "success":
+        raise HTTPException(
+            status_code=401,
+            detail="MSG91 OTP verification failed"
+        )
+
+    identifier = result.get("message")
+
+    if not isinstance(identifier, str) or not identifier.strip():
+        raise HTTPException(
+            status_code=401,
+            detail="MSG91 returned an invalid verification result"
+        )
+
+    return identifier.strip()
+
 
 
 OTP_EXPIRY_MINUTES = 5

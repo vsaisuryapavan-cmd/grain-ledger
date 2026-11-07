@@ -24,6 +24,15 @@ CREATE TABLE users (
     created_at           TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
+CREATE TABLE login_challenges (
+    id          BIGSERIAL PRIMARY KEY,
+    challenge_id VARCHAR(128) NOT NULL UNIQUE,
+    user_id     BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    expires_at  TIMESTAMPTZ NOT NULL,
+    used        BOOLEAN NOT NULL DEFAULT FALSE,
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
 -- Farmers, customers, suppliers, buyers: all "parties"
 CREATE TABLE parties (
     id              BIGSERIAL PRIMARY KEY,

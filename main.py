@@ -1,6 +1,6 @@
-
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from decimal import Decimal
+import secrets
 
 from fastapi import FastAPI, Depends, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -11,11 +11,22 @@ from pydantic import BaseModel, Field
 
 from database import get_db
 from models import (
-    Party, Item, StockMovement, LedgerEntry, Payment, User,
-    CommissiondarLoan, CommissiondarLoanRepayment,
-    MillCommissiondarLoan, MillCommissiondarLoanRepayment,
-    BrokerCommission, CommissiondarStockMovement,
-    LoginLog, IssueReport, Business,
+    Party,
+    Item,
+    StockMovement,
+    LedgerEntry,
+    Payment,
+    User,
+    CommissiondarLoan,
+    CommissiondarLoanRepayment,
+    MillCommissiondarLoan,
+    MillCommissiondarLoanRepayment,
+    BrokerCommission,
+    CommissiondarStockMovement,
+    LoginLog,
+    IssueReport,
+    Business,
+    LoginChallenge,
 )
 from auth import (
     create_access_token,
@@ -25,11 +36,10 @@ from auth import (
     verify_otp,
     OTP_CHALLENGES,
     hash_password,
+    verify_msg91_access_token,
 )
 
-
 app = FastAPI()
-
 
 # ---------------------------------------------------------------
 # CORS
@@ -45,7 +55,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
 
 # ---------------------------------------------------------------
 # Request models
@@ -80,7 +89,8 @@ class LoginRequest(BaseModel):
 
 class OTPVerifyRequest(BaseModel):
     challenge_id: str
-    otp: str
+    access_token: str
+
 
 class MillerRegisterRequest(BaseModel):
     name: str = Field(min_length=1, max_length=150)
@@ -157,7 +167,6 @@ def farmer_balance(db: Session, farmer: Party, business_id: int):
     Outstanding balance =
     opening balance + non-voided ledger debits - credits.
     """
-
     ledger_balance = db.query(
         func.coalesce(
             func.sum(LedgerEntry.debit - LedgerEntry.credit),
@@ -234,7 +243,6 @@ def require_commissiondar(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ) -> User:
-
     party = db.query(Party).filter(
         Party.id == current_user.party_id,
         Party.business_id == current_user.business_id,
@@ -254,7 +262,6 @@ def require_commissiondar(
 def require_owner(
     current_user: User = Depends(get_current_user)
 ) -> User:
-
     if current_user.role != "owner":
         raise HTTPException(
             status_code=403,
@@ -276,11 +283,8 @@ def root():
 
 
 # ---------------------------------------------------------------
-# Login
+# Registration
 # ---------------------------------------------------------------
-
-
-
 
 @app.post("/api/register/miller", status_code=201)
 def register_miller(
@@ -327,7 +331,6 @@ def register_miller(
             approval_status="pending"
         )
         db.add(user)
-
         db.commit()
 
         return {
@@ -348,7 +351,6 @@ def register_miller(
             status_code=500,
             detail="Miller registration failed"
         )
-
 
 
 @app.post("/api/register/commissiondar", status_code=201)
@@ -407,7 +409,6 @@ def register_commissiondar(
             approval_status="pending"
         )
         db.add(user)
-
         db.commit()
 
         return {
@@ -430,6 +431,9 @@ def register_commissiondar(
         )
 
 
+# ---------------------------------------------------------------
+# Login
+# ---------------------------------------------------------------
 
 @app.post("/api/login")
 def login(
@@ -464,7 +468,6 @@ def login(
             detail="Invalid phone number or password"
         )
 
-    # Check account approval before issuing OTP
     if user.approval_status == "pending":
         raise HTTPException(
             status_code=403,
@@ -483,17 +486,35 @@ def login(
             detail="Your account cannot log in"
         )
 
-    try:
-        challenge_id = create_otp_challenge(user.id)
+    # Invalidate previous unused challenges for this user
+    db.query(LoginChallenge).filter(
+        LoginChallenge.user_id == user.id,
+        LoginChallenge.used == False
+    ).delete(synchronize_session=False)
 
-    except RuntimeError:
+    # Create a new persistent login challenge
+    challenge_id = secrets.token_urlsafe(32)
+
+    challenge = LoginChallenge(
+        challenge_id=challenge_id,
+        user_id=user.id,
+        expires_at=datetime.now(timezone.utc) + timedelta(minutes=15),
+        used=False
+    )
+
+    try:
+        db.add(challenge)
+        db.commit()
+
+    except Exception:
+        db.rollback()
         raise HTTPException(
-            status_code=503,
-            detail="OTP service is not configured"
+            status_code=500,
+            detail="Failed to create login challenge"
         )
 
     return {
-        "message": "Passwords verified. OTP required.",
+        "message": "Passwords verified. MSG91 OTP required.",
         "challenge_id": challenge_id
     }
 
@@ -503,18 +524,28 @@ def verify_login_otp(
     data: OTPVerifyRequest,
     db: Session = Depends(get_db)
 ):
-    challenge = OTP_CHALLENGES.get(data.challenge_id)
+    # 1. Find the login challenge
+    challenge = db.query(LoginChallenge).filter(
+        LoginChallenge.challenge_id == data.challenge_id
+    ).first()
 
-    if not challenge:
+    if not challenge or challenge.used:
         raise HTTPException(
             status_code=401,
-            detail="Invalid or expired OTP"
+            detail="Invalid or expired login challenge"
         )
 
-    user_id = challenge["user_id"]
+    now = datetime.now(timezone.utc)
 
+    if challenge.expires_at <= now:
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid or expired login challenge"
+        )
+
+    # 2. Find the user
     user = db.query(User).filter(
-        User.id == user_id
+        User.id == challenge.user_id
     ).first()
 
     if not user:
@@ -523,22 +554,65 @@ def verify_login_otp(
             detail="User account not found"
         )
 
-    # Check approval again before issuing JWT
     if user.approval_status != "approved":
-        OTP_CHALLENGES.pop(data.challenge_id, None)
-
         raise HTTPException(
             status_code=403,
             detail="Your account is not approved"
         )
 
-    if not verify_otp(data.challenge_id, data.otp):
+    # 3. Verify MSG91 widget access token
+    verified_identifier = verify_msg91_access_token(
+        data.access_token
+    )
+
+    # 4. Normalize phone numbers
+    verified_phone = "".join(
+        character for character in verified_identifier
+        if character.isdigit()
+    )
+
+    if len(verified_phone) == 12 and verified_phone.startswith("91"):
+        verified_phone = verified_phone[2:]
+
+    stored_phone = "".join(
+        character for character in user.phone
+        if character.isdigit()
+    )
+
+    if verified_phone != stored_phone:
         raise HTTPException(
             status_code=401,
-            detail="Invalid or expired OTP"
+            detail="Verified phone number does not match your account"
         )
 
+    # 5. Atomically consume the challenge and record login
     try:
+        result = db.query(LoginChallenge).filter(
+            LoginChallenge.id == challenge.id,
+            LoginChallenge.used.is_(False),
+            LoginChallenge.expires_at > datetime.now(timezone.utc)
+        ).update(
+            {LoginChallenge.used: True},
+            synchronize_session=False
+        )
+
+        if result != 1:
+            db.rollback()
+            raise HTTPException(
+                status_code=401,
+                detail="Invalid, expired, or already-used login challenge"
+            )
+
+        # Refresh account status before issuing token
+        db.refresh(user)
+
+        if user.approval_status != "approved":
+            db.rollback()
+            raise HTTPException(
+                status_code=403,
+                detail="Your account is not approved"
+            )
+
         log = LoginLog(
             phone=user.phone,
             user_id=user.id,
@@ -548,14 +622,17 @@ def verify_login_otp(
         db.add(log)
         db.commit()
 
+    except HTTPException:
+        raise
+
     except Exception:
         db.rollback()
-
         raise HTTPException(
             status_code=500,
             detail="Failed to record login"
         )
 
+    # 6. Generate JWT access token
     token = create_access_token(user)
 
     return {
@@ -563,7 +640,6 @@ def verify_login_otp(
         "access_token": token,
         "token_type": "bearer"
     }
-
 
 
 # ---------------------------------------------------------------
@@ -576,7 +652,6 @@ def record_intake(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
-
     get_active_item(
         db,
         data.item_id,
@@ -592,7 +667,6 @@ def record_intake(
     broker = None
 
     if data.broker_id is not None:
-
         broker = db.query(Party).filter(
             Party.id == data.broker_id,
             Party.business_id == current_user.business_id,
@@ -619,7 +693,6 @@ def record_intake(
         )
 
     try:
-
         movement = StockMovement(
             business_id=current_user.business_id,
             item_id=data.item_id,
@@ -689,7 +762,6 @@ def record_payment(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
-
     get_active_farmer(
         db,
         data.farmer_id,
@@ -702,7 +774,6 @@ def record_payment(
         mode = None
 
     try:
-
         payment = Payment(
             business_id=current_user.business_id,
             party_id=data.farmer_id,
@@ -723,7 +794,6 @@ def record_payment(
         )
 
         db.add(ledger)
-
         db.commit()
 
         db.refresh(payment)
@@ -752,7 +822,6 @@ def record_export(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_owner)
 ):
-
     get_active_item(
         db,
         data.item_id,
@@ -773,7 +842,6 @@ def record_export(
         )
 
     try:
-
         movement = StockMovement(
             business_id=current_user.business_id,
             item_id=data.item_id,
@@ -795,7 +863,6 @@ def record_export(
         )
 
         db.add(ledger)
-
         db.commit()
 
         db.refresh(movement)
@@ -823,7 +890,6 @@ def dashboard(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_owner)
 ):
-
     business_id = current_user.business_id
 
     total_stock = db.query(
@@ -890,7 +956,6 @@ def profit_summary(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_owner)
 ):
-
     revenue = db.query(
         func.coalesce(
             func.sum(
@@ -952,7 +1017,6 @@ def create_loan(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_commissiondar)
 ):
-
     farmer = db.query(Party).filter(
         Party.id == data.farmer_id,
         Party.party_type == "farmer",
@@ -992,7 +1056,6 @@ def list_my_loans(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_commissiondar)
 ):
-
     loans = db.query(CommissiondarLoan).filter(
         CommissiondarLoan.commissiondar_id == current_user.party_id,
         CommissiondarLoan.is_void == False
@@ -1001,7 +1064,6 @@ def list_my_loans(
     result = []
 
     for loan in loans:
-
         days_elapsed = max(
             0,
             (datetime.now(timezone.utc).date() - loan.issued_at).days
@@ -1048,7 +1110,6 @@ def repay_loan(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_commissiondar)
 ):
-
     loan = db.query(CommissiondarLoan).filter(
         CommissiondarLoan.id == data.loan_id,
         CommissiondarLoan.commissiondar_id == current_user.party_id,
@@ -1086,7 +1147,6 @@ def commissiondar_dashboard(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_commissiondar)
 ):
-
     loans = db.query(CommissiondarLoan).filter(
         CommissiondarLoan.commissiondar_id == current_user.party_id,
         CommissiondarLoan.is_void == False
@@ -1099,7 +1159,6 @@ def commissiondar_dashboard(
     total_outstanding = 0
 
     for loan in loans:
-
         days_elapsed = max(
             0,
             (datetime.now(timezone.utc).date() - loan.issued_at).days
@@ -1158,7 +1217,6 @@ def create_mill_loan(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_owner)
 ):
-
     commissiondar = db.query(Party).filter(
         Party.id == data.commissiondar_id,
         Party.business_id == current_user.business_id,
@@ -1199,7 +1257,6 @@ def list_mill_loans(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_owner)
 ):
-
     loans = db.query(MillCommissiondarLoan).filter(
         MillCommissiondarLoan.business_id == current_user.business_id,
         MillCommissiondarLoan.is_void == False
@@ -1208,7 +1265,6 @@ def list_mill_loans(
     result = []
 
     for loan in loans:
-
         days_elapsed = max(
             0,
             (datetime.now(timezone.utc).date() - loan.issued_at).days
@@ -1255,7 +1311,6 @@ def repay_mill_loan(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_owner)
 ):
-
     loan = db.query(MillCommissiondarLoan).filter(
         MillCommissiondarLoan.id == data.loan_id,
         MillCommissiondarLoan.business_id == current_user.business_id,
@@ -1297,7 +1352,6 @@ def list_commissions(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_owner)
 ):
-
     return db.query(BrokerCommission).filter(
         BrokerCommission.business_id == current_user.business_id,
         BrokerCommission.is_void == False
@@ -1310,7 +1364,6 @@ def pay_commission(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_owner)
 ):
-
     commission = db.query(BrokerCommission).filter(
         BrokerCommission.id == data.commission_id,
         BrokerCommission.business_id == current_user.business_id,
@@ -1354,7 +1407,6 @@ def receive_from_farmer(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_commissiondar)
 ):
-
     farmer = db.query(Party).filter(
         Party.id == data.farmer_id,
         Party.party_type == "farmer",
@@ -1408,7 +1460,6 @@ def deliver_to_mill(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_commissiondar)
 ):
-
     item = db.query(Item).filter(
         Item.id == data.item_id,
         Item.business_id == data.business_id,
@@ -1450,7 +1501,6 @@ def my_stock(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_commissiondar)
 ):
-
     on_hand = db.query(
         func.coalesce(
             func.sum(CommissiondarStockMovement.quantity),
@@ -1484,7 +1534,6 @@ def report_issue(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
-
     try:
         issue = IssueReport(
             user_id=current_user.id,
@@ -1522,7 +1571,6 @@ def report_issue(
 def require_admin(
     current_user: User = Depends(get_current_user)
 ) -> User:
-
     if current_user.role != "admin":
         raise HTTPException(
             status_code=403,
@@ -1639,13 +1687,11 @@ def admin_dashboard_summary(
     }
 
 
-
 @app.get("/api/admin/login-logs")
 def login_logs(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_admin)
 ):
-
     return db.query(LoginLog).order_by(
         LoginLog.created_at.desc()
     ).limit(100).all()
@@ -1656,11 +1702,9 @@ def list_issues(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_admin)
 ):
-
     return db.query(IssueReport).order_by(
         IssueReport.created_at.desc()
     ).all()
-
 
 
 # ---------------------------------------------------------------
@@ -1782,7 +1826,6 @@ def list_items(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_owner)
 ):
-
     items = db.query(Item).filter(
         Item.business_id == current_user.business_id,
         Item.is_active == True
@@ -1812,7 +1855,6 @@ def list_farmers(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_owner)
 ):
-
     farmers = db.query(Party).filter(
         Party.business_id == current_user.business_id,
         Party.party_type == "farmer",
@@ -1824,7 +1866,6 @@ def list_farmers(
     result = []
 
     for farmer in farmers:
-
         owed = farmer_balance(
             db,
             farmer,
@@ -1840,14 +1881,13 @@ def list_farmers(
     return result
 
 
-# NEW: Create farmer
+# Create farmer
 @app.post("/api/farmers")
 def create_farmer(
     data: FarmerCreate,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_owner)
 ):
-
     name = data.name.strip()
     village = data.village.strip()
 
