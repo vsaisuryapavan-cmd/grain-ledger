@@ -51,6 +51,13 @@ class Party(Base):
     phone = Column(String)
     village = Column(String)
     party_type = Column(String, nullable=False)
+    # Miller-owned farmer -> Miller-owned Commissiondar contact association.
+    # This never references a Commissiondar login account.
+    associated_commissiondar_id = Column(
+        BigInteger,
+        ForeignKey("parties.id"),
+        nullable=True
+    )
     opening_balance = Column(
         Numeric(14, 2),
         nullable=False,
@@ -228,6 +235,11 @@ class StockMovement(Base):
     quantity = Column(Numeric(14, 3), nullable=False)
     rate = Column(Numeric(12, 2))
     moisture_pct = Column(Numeric(5, 2))
+    packet_count = Column(Numeric(14, 3))
+    packet_price = Column(Numeric(12, 2))
+    commission_type = Column(String(20))
+    commission_rate = Column(Numeric(12, 2))
+    commission_per_packet = Column(Numeric(12, 2))
     moved_at = Column(
         DateTime(timezone=True),
         server_default=func.now()
@@ -389,6 +401,11 @@ class BrokerCommission(Base):
         ForeignKey("stock_movements.id")
     )
     commission_amount = Column(Numeric(12, 2), nullable=False)
+    packet_count = Column(Numeric(14, 3))
+    packet_price = Column(Numeric(12, 2))
+    commission_type = Column(String(20))
+    commission_rate = Column(Numeric(12, 2))
+    commission_per_packet = Column(Numeric(12, 2))
     is_paid = Column(Boolean, nullable=False, default=False)
     created_at = Column(
         DateTime(timezone=True),
@@ -414,7 +431,7 @@ class CommissiondarStockMovement(Base):
     item_id = Column(
         BigInteger,
         ForeignKey("items.id"),
-        nullable=False
+        nullable=True
     )
 
     # New independent grain catalogue reference.
@@ -425,6 +442,7 @@ class CommissiondarStockMovement(Base):
     )
 
     movement_type = Column(String, nullable=False)
+    mill_name = Column(String(200))
     quantity = Column(Numeric(14, 3), nullable=False)
     rate = Column(Numeric(12, 2))
 

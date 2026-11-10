@@ -1,5 +1,6 @@
 import main
 import pytest
+import uuid
 from fastapi.testclient import TestClient
 from main import app
 
@@ -321,48 +322,52 @@ def test_commissiondar_dashboard_shape():
 def test_commissiondar_stock_on_hand_nets_correctly():
     headers = get_headers("8888888888")
 
-    before_response = client.get(
-        "/api/commissiondar-stock",
-        headers=headers
+    farmer = client.post(
+        "/api/commissiondar/farmers",
+        json={"name": "Stock Test Farmer", "village": "Stock Village"},
+        headers=headers,
     )
+    assert farmer.status_code == 201, farmer.text
 
+    grain = client.post(
+        "/api/commissiondar/grain-types",
+        json={"name": f"Stock Test Grain {uuid.uuid4().hex[:8]}", "unit": "quintal"},
+        headers=headers,
+    )
+    assert grain.status_code == 201, grain.text
+
+    before_response = client.get("/api/commissiondar-stock", headers=headers)
     assert before_response.status_code == 200, before_response.text
     before = before_response.json()["stock_on_hand"]
 
     receive = client.post(
         "/api/commissiondar-stock/receive",
         json={
-            "farmer_id": 3,
-            "item_id": 2,
+            "farmer_id": farmer.json()["id"],
+            "grain_type_id": grain.json()["id"],
             "quantity": 15,
-            "rate": 2200
+            "rate": 2200,
         },
-        headers=headers
+        headers=headers,
     )
-
     assert receive.status_code == 200, receive.text
 
     deliver = client.post(
         "/api/commissiondar-stock/deliver",
         json={
-            "business_id": 1,
-            "item_id": 2,
+            "mill_name": "Independently Entered Mill",
+            "grain_type_id": grain.json()["id"],
             "quantity": 6,
-            "rate": 2200
+            "rate": 2200,
         },
-        headers=headers
+        headers=headers,
     )
-
     assert deliver.status_code == 200, deliver.text
+    assert deliver.json()["mill_name"] == "Independently Entered Mill"
 
-    after_response = client.get(
-        "/api/commissiondar-stock",
-        headers=headers
-    )
-
+    after_response = client.get("/api/commissiondar-stock", headers=headers)
     assert after_response.status_code == 200, after_response.text
     after = after_response.json()["stock_on_hand"]
-
     assert after == before + 15 - 6
 
 
@@ -1025,3 +1030,120 @@ def test_login_challenge_cannot_be_reused(monkeypatch):
     )
 
     assert second_response.status_code == 401
+# -------------------------
+# Phase 1 independent-account additions
+# -------------------------
+
+def test_miller_can_manage_private_commissiondar_contacts_and_packet_commission():
+    headers = get_headers("9999999999")
+    contact = client.post(
+        "/api/miller/commissiondars",
+        json={"name": "Phase1 Contact Test"},
+        headers=headers,
+    )
+    assert contact.status_code == 201, contact.text
+    contact_id = contact.json()["id"]
+
+    farmer = client.post(
+        "/api/farmers",
+        json={"name": "Phase1 Farmer Test", "village": "Test Village", "associated_commissiondar_id": contact_id},
+        headers=headers,
+    )
+    assert farmer.status_code == 200, farmer.text
+    farmer_id = farmer.json()["id"]
+
+    intake = client.post(
+        "/api/intake",
+        json={
+            "farmer_id": farmer_id,
+            "item_id": 2,
+            "quantity": 4,
+            "rate": 2200,
+            "packet_count": 10,
+            "packet_price": 2200,
+            "commission_type": "fixed",
+            "commission_rate": 50,
+        },
+        headers=headers,
+    )
+    assert intake.status_code == 200, intake.text
+    assert float(intake.json()["broker_commission"]["commission_amount"]) == 500
+
+    percentage_intake = client.post(
+        "/api/intake",
+        json={
+            "farmer_id": farmer_id,
+            "item_id": 2,
+            "quantity": 4,
+            "rate": 2200,
+            "packet_count": 10,
+            "packet_price": 2200,
+            "commission_type": "percentage",
+            "commission_rate": 2.5,
+        },
+        headers=headers,
+    )
+    assert percentage_intake.status_code == 200, percentage_intake.text
+    assert float(percentage_intake.json()["broker_commission"]["commission_amount"]) == 550
+
+    contacts = client.get("/api/miller/commissiondars", headers=headers)
+    assert contacts.status_code == 200, contacts.text
+    row = next(x for x in contacts.json() if x["id"] == contact_id)
+    assert row["visit_count"] == 2
+    assert row["total_packets"] == 20
+    assert row["total_commission"] == 1050
+
+    assert row["visit_count"] == 2
+    assert row["total_packets"] == 20
+    assert row["total_commission"] == 1050
+
+
+def test_commissiondar_can_manage_own_farmers_and_independent_stock_delivery():
+    headers = get_headers("8888888888")
+    farmer = client.post(
+        "/api/commissiondar/farmers",
+        json={"name": "Commissiondar Own Farmer", "village": "Own Village"},
+        headers=headers,
+    )
+    assert farmer.status_code == 201, farmer.text
+    farmer_id = farmer.json()["id"]
+
+    grain = client.post(
+        "/api/commissiondar/grain-types",
+        json={"name": f"Commissiondar Test Paddy {uuid.uuid4().hex[:8]}", "unit": "quintal"},
+        headers=headers,
+    )
+    assert grain.status_code == 201, grain.text
+    grain_type_id = grain.json()["id"]
+
+    received = client.post(
+        "/api/commissiondar-stock/receive",
+        json={"farmer_id": farmer_id, "grain_type_id": grain_type_id, "quantity": 12, "rate": 2200},
+        headers=headers,
+    )
+    assert received.status_code == 200, received.text
+
+    delivered = client.post(
+        "/api/commissiondar-stock/deliver",
+        json={"mill_name": "Manually Entered Mill", "grain_type_id": grain_type_id, "quantity": 5, "rate": 2200},
+        headers=headers,
+    )
+    assert delivered.status_code == 200, delivered.text
+    assert delivered.json()["mill_name"] == "Manually Entered Mill"
+
+    stock = client.get("/api/commissiondar-stock", headers=headers)
+    assert stock.status_code == 200, stock.text
+    assert stock.json()["stock_on_hand"] >= 7
+    assert any(x["mill_name"] == "Manually Entered Mill" for x in stock.json()["deliveries_by_mill"])
+
+
+def test_commissiondar_cannot_use_miller_farmer_directory():
+    headers = get_headers("8888888888")
+    response = client.get("/api/farmers", headers=headers)
+    assert response.status_code == 403
+
+
+def test_miller_cannot_use_commissiondar_farmer_directory():
+    headers = get_headers("9999999999")
+    response = client.get("/api/commissiondar/farmers", headers=headers)
+    assert response.status_code == 403

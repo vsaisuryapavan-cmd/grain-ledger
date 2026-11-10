@@ -27,6 +27,7 @@ from models import (
     IssueReport,
     Business,
     LoginChallenge,
+    GrainType,
 )
 from auth import (
     create_access_token,
@@ -60,8 +61,39 @@ app.add_middleware(
 # ---------------------------------------------------------------
 
 class FarmerCreate(BaseModel):
-    name: str
-    village: str
+    name: str = Field(min_length=1, max_length=150)
+    village: str = Field(min_length=1, max_length=150)
+    associated_commissiondar_id: int | None = None
+
+
+class FarmerUpdate(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=150)
+    village: str | None = Field(default=None, min_length=1, max_length=150)
+    associated_commissiondar_id: int | None = None
+
+
+class CommissiondarContactCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=150)
+    phone: str | None = Field(default=None, max_length=20)
+    village: str | None = Field(default=None, max_length=150)
+
+
+class CommissiondarContactUpdate(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=150)
+    phone: str | None = Field(default=None, max_length=20)
+    village: str | None = Field(default=None, max_length=150)
+    is_active: bool | None = None
+
+
+class CommissiondarFarmerCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=150)
+    village: str | None = Field(default=None, max_length=150)
+    phone: str | None = Field(default=None, max_length=20)
+
+
+class GrainTypeCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+    unit: str = Field(default="quintal", min_length=1, max_length=30)
 
 
 class IntakeCreate(BaseModel):
@@ -71,7 +103,12 @@ class IntakeCreate(BaseModel):
     rate: float = Field(gt=0)
     moisture_pct: float | None = Field(default=None, ge=0, le=100)
     broker_id: int | None = None
-    commission_amount: float | None = Field(default=None, gt=0)
+    # Legacy total commission remains supported for old clients.
+    commission_amount: float | None = Field(default=None, ge=0)
+    packet_count: int | None = Field(default=None, gt=0)
+    packet_price: float | None = Field(default=None, gt=0)
+    commission_type: str | None = Field(default=None, pattern="^(fixed|percentage)$")
+    commission_rate: float | None = Field(default=None, ge=0)
 
 
 class PaymentCreate(BaseModel):
@@ -141,16 +178,18 @@ class CommissionPay(BaseModel):
 
 class CommissiondarReceive(BaseModel):
     farmer_id: int
-    item_id: int
+    item_id: int | None = None
+    grain_type_id: int | None = None
     quantity: float = Field(gt=0)
     rate: float | None = Field(default=None, gt=0)
 
 
 class CommissiondarDeliver(BaseModel):
-    business_id: int
-    item_id: int
+    mill_name: str = Field(min_length=1, max_length=200)
+    item_id: int | None = None
+    grain_type_id: int | None = None
     quantity: float = Field(gt=0)
-    rate: float = Field(gt=0)
+    rate: float | None = Field(default=None, gt=0)
 
 
 class IssueReportCreate(BaseModel):
@@ -649,7 +688,7 @@ def verify_login_otp(
 def record_intake(
     data: IntakeCreate,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(require_owner)
 ):
     get_active_item(
         db,
@@ -657,17 +696,20 @@ def record_intake(
         current_user.business_id
     )
 
-    get_active_farmer(
+    farmer = get_active_farmer(
         db,
         data.farmer_id,
         current_user.business_id
     )
+    if farmer.associated_commissiondar_id is not None and data.broker_id is not None and data.broker_id != farmer.associated_commissiondar_id:
+        raise HTTPException(status_code=400, detail="This farmer is associated with a different Commissiondar")
+    selected_broker_id = data.broker_id or farmer.associated_commissiondar_id
 
     broker = None
 
-    if data.broker_id is not None:
+    if selected_broker_id is not None:
         broker = db.query(Party).filter(
-            Party.id == data.broker_id,
+            Party.id == selected_broker_id,
             Party.business_id == current_user.business_id,
             Party.party_type == "commissiondar",
             Party.is_active == True
@@ -679,17 +721,28 @@ def record_intake(
                 detail="Commissiondar not found or inactive"
             )
 
-        if data.commission_amount is None:
-            raise HTTPException(
-                status_code=400,
-                detail="Commission amount is required when a broker is selected"
-            )
-
-    elif data.commission_amount is not None:
-        raise HTTPException(
-            status_code=400,
-            detail="Select a broker before entering commission amount"
-        )
+        if data.commission_type is not None:
+            if data.packet_count is None or data.commission_rate is None:
+                raise HTTPException(status_code=400, detail="Packet count and commission rate are required")
+            if data.commission_type == "fixed":
+                commission_per_packet = Decimal(str(data.commission_rate))
+            else:
+                if data.packet_price is None:
+                    raise HTTPException(status_code=400, detail="Packet price is required for percentage commission")
+                if data.commission_rate > 100:
+                    raise HTTPException(status_code=400, detail="Commission percentage cannot exceed 100")
+                commission_per_packet = (Decimal(str(data.packet_price)) * Decimal(str(data.commission_rate))) / Decimal("100")
+            calculated_commission = commission_per_packet * Decimal(str(data.packet_count))
+        else:
+            if data.commission_amount is None:
+                raise HTTPException(status_code=400, detail="Commission details are required when a Commissiondar is selected")
+            commission_per_packet = None
+            calculated_commission = Decimal(str(data.commission_amount))
+    elif any(value is not None for value in (data.commission_amount, data.packet_count, data.packet_price, data.commission_type, data.commission_rate)):
+        raise HTTPException(status_code=400, detail="Select a Commissiondar before entering commission details")
+    else:
+        commission_per_packet = None
+        calculated_commission = None
 
     try:
         movement = StockMovement(
@@ -700,7 +753,12 @@ def record_intake(
             quantity=data.quantity,
             rate=data.rate,
             moisture_pct=data.moisture_pct,
-            broker_id=data.broker_id,
+            broker_id=(broker.id if broker else None),
+            packet_count=data.packet_count,
+            packet_price=data.packet_price,
+            commission_type=data.commission_type,
+            commission_rate=data.commission_rate,
+            commission_per_packet=commission_per_packet,
             created_by=current_user.id,
         )
 
@@ -724,7 +782,12 @@ def record_intake(
                 commissiondar_id=broker.id,
                 farmer_id=data.farmer_id,
                 movement_id=movement.id,
-                commission_amount=data.commission_amount,
+                commission_amount=calculated_commission,
+                packet_count=data.packet_count,
+                packet_price=data.packet_price,
+                commission_type=data.commission_type,
+                commission_rate=data.commission_rate,
+                commission_per_packet=commission_per_packet,
             )
 
             db.add(commission)
@@ -759,7 +822,7 @@ def record_intake(
 def record_payment(
     data: PaymentCreate,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(require_owner)
 ):
     get_active_farmer(
         db,
@@ -939,10 +1002,30 @@ def dashboard(
         func.date(StockMovement.moved_at) == today
     ).scalar()
 
+    seven_days_ago = today - timedelta(days=6)
+    last_seven_days_intake = db.query(func.coalesce(func.sum(StockMovement.quantity), 0)).filter(
+        StockMovement.business_id == business_id,
+        StockMovement.movement_type == "purchase",
+        StockMovement.is_void == False,
+        func.date(StockMovement.moved_at) >= seven_days_ago,
+        func.date(StockMovement.moved_at) <= today
+    ).scalar() or 0
+    total_farmers = db.query(func.count(Party.id)).filter(Party.business_id == business_id, Party.party_type == "farmer", Party.is_active == True).scalar() or 0
+    last_seven_days_records = db.query(StockMovement).filter(
+        StockMovement.business_id == business_id,
+        StockMovement.movement_type == "purchase",
+        StockMovement.is_void == False,
+        func.date(StockMovement.moved_at) >= seven_days_ago,
+        func.date(StockMovement.moved_at) <= today
+    ).order_by(StockMovement.moved_at.desc()).all()
     return {
         "total_stock": total_stock,
         "total_owed": float(total_owed),
         "today_intake": today_intake,
+        "total_farmers": int(total_farmers),
+        "last_seven_days_intake": float(last_seven_days_intake),
+        "last_seven_days_records": last_seven_days_records,
+        "total_commissiondars": db.query(func.count(Party.id)).filter(Party.business_id == business_id, Party.party_type == "commissiondar", Party.is_active == True).scalar() or 0,
     }
 
 
@@ -1018,6 +1101,7 @@ def create_loan(
 ):
     farmer = db.query(Party).filter(
         Party.id == data.farmer_id,
+        Party.business_id == current_user.business_id,
         Party.party_type == "farmer",
         Party.is_active == True
     ).first()
@@ -1086,9 +1170,11 @@ def list_my_loans(
             CommissiondarLoanRepayment.is_void == False
         ).scalar()
 
+        farmer = db.query(Party).filter(Party.id == loan.farmer_id, Party.business_id == current_user.business_id, Party.party_type == "farmer").first()
         result.append({
             "id": loan.id,
             "farmer_id": loan.farmer_id,
+            "farmer_name": farmer.name if farmer else None,
             "principal": loan.principal,
             "interest_rate_pa": loan.interest_rate_pa,
             "interest_accrued": round(interest, 2),
@@ -1187,22 +1273,29 @@ def commissiondar_dashboard(
             - float(repaid or 0)
         )
 
-    commissions_pending = db.query(
-        func.coalesce(
-            func.sum(BrokerCommission.commission_amount),
-            0
-        )
-    ).filter(
-        BrokerCommission.commissiondar_id == current_user.party_id,
-        BrokerCommission.is_paid == False,
-        BrokerCommission.is_void == False
-    ).scalar()
+    # Miller-side commission records are intentionally not read here. The two
+    # business accounts are independent; pending commission is zero until the
+    # Commissiondar records its own commission receivables in its own account.
+    commissions_pending = 0.0
+    farmer_count = db.query(func.count(Party.id)).filter(
+        Party.business_id == current_user.business_id,
+        Party.party_type == "farmer",
+        Party.is_active == True
+    ).scalar() or 0
+    latest_loan = db.query(CommissiondarLoan).filter(
+        CommissiondarLoan.commissiondar_id == current_user.party_id,
+        CommissiondarLoan.is_void == False
+    ).order_by(CommissiondarLoan.issued_at.desc(), CommissiondarLoan.id.desc()).first()
+
 
     return {
         "active_loans": len(loans),
         "total_lent_out": round(total_lent, 2),
         "total_outstanding": round(total_outstanding, 2),
         "commissions_pending": commissions_pending,
+        "total_farmers": farmer_count,
+        "latest_loan": ({"id": latest_loan.id, "farmer_id": latest_loan.farmer_id, "principal": float(latest_loan.principal), "issued_at": str(latest_loan.issued_at)} if latest_loan else None),
+        "latest_commission": None,
     }
 
 
@@ -1408,48 +1501,45 @@ def receive_from_farmer(
 ):
     farmer = db.query(Party).filter(
         Party.id == data.farmer_id,
+        Party.business_id == current_user.business_id,
         Party.party_type == "farmer",
         Party.is_active == True
     ).first()
-
     if not farmer:
-        raise HTTPException(
-            status_code=404,
-            detail="Farmer not found or inactive"
-        )
+        raise HTTPException(status_code=404, detail="Farmer not found or inactive in this Commissiondar account")
 
-    item = db.query(Item).filter(
-        Item.id == data.item_id,
-        Item.is_active == True
-    ).first()
+    grain_type = None
+    if data.grain_type_id is not None:
+        grain_type = db.query(GrainType).filter(
+            GrainType.id == data.grain_type_id,
+            GrainType.is_active == True,
+            (GrainType.owner_business_id == current_user.business_id) | (GrainType.owner_business_id.is_(None))
+        ).first()
+        if not grain_type:
+            raise HTTPException(status_code=404, detail="Grain type not found")
+    elif data.item_id is not None:
+        item = db.query(Item).filter(
+            Item.id == data.item_id,
+            Item.business_id == current_user.business_id,
+            Item.is_active == True
+        ).first()
+        if not item:
+            raise HTTPException(status_code=404, detail="Item not found in this Commissiondar account")
+    else:
+        raise HTTPException(status_code=400, detail="Provide grain_type_id or item_id")
 
-    if not item:
-        raise HTTPException(
-            status_code=404,
-            detail="Item not found or inactive"
-        )
-
-    try:
-        movement = CommissiondarStockMovement(
-            commissiondar_id=current_user.party_id,
-            farmer_id=data.farmer_id,
-            item_id=data.item_id,
-            movement_type="received_from_farmer",
-            quantity=data.quantity,
-            rate=data.rate,
-        )
-
-        db.add(movement)
-        db.commit()
-        db.refresh(movement)
-
-    except Exception:
-        db.rollback()
-        raise HTTPException(
-            status_code=500,
-            detail="Failed to record stock receipt"
-        )
-
+    movement = CommissiondarStockMovement(
+        commissiondar_id=current_user.party_id,
+        farmer_id=data.farmer_id,
+        item_id=data.item_id,
+        grain_type_id=data.grain_type_id,
+        movement_type="received_from_farmer",
+        quantity=data.quantity,
+        rate=data.rate,
+    )
+    db.add(movement)
+    commit_transaction(db, "Failed to record stock receipt")
+    db.refresh(movement)
     return movement
 
 
@@ -1459,39 +1549,40 @@ def deliver_to_mill(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_commissiondar)
 ):
-    item = db.query(Item).filter(
-        Item.id == data.item_id,
-        Item.business_id == data.business_id,
-        Item.is_active == True
-    ).first()
+    mill_name = data.mill_name.strip()
+    if not mill_name:
+        raise HTTPException(status_code=400, detail="Mill name cannot be empty")
+    if data.grain_type_id is not None:
+        grain_type = db.query(GrainType).filter(
+            GrainType.id == data.grain_type_id,
+            GrainType.is_active == True,
+            (GrainType.owner_business_id == current_user.business_id) | (GrainType.owner_business_id.is_(None))
+        ).first()
+        if not grain_type:
+            raise HTTPException(status_code=404, detail="Grain type not found")
+    elif data.item_id is not None:
+        item = db.query(Item).filter(
+            Item.id == data.item_id,
+            Item.business_id == current_user.business_id,
+            Item.is_active == True
+        ).first()
+        if not item:
+            raise HTTPException(status_code=404, detail="Item not found in this Commissiondar account")
+    else:
+        raise HTTPException(status_code=400, detail="Provide grain_type_id or item_id")
 
-    if not item:
-        raise HTTPException(
-            status_code=404,
-            detail="Item not found or inactive for this business"
-        )
-
-    try:
-        movement = CommissiondarStockMovement(
-            commissiondar_id=current_user.party_id,
-            business_id=data.business_id,
-            item_id=data.item_id,
-            movement_type="delivered_to_mill",
-            quantity=-data.quantity,
-            rate=data.rate,
-        )
-
-        db.add(movement)
-        db.commit()
-        db.refresh(movement)
-
-    except Exception:
-        db.rollback()
-        raise HTTPException(
-            status_code=500,
-            detail="Failed to record stock delivery"
-        )
-
+    movement = CommissiondarStockMovement(
+        commissiondar_id=current_user.party_id,
+        mill_name=mill_name,
+        item_id=data.item_id,
+        grain_type_id=data.grain_type_id,
+        movement_type="delivered_to_mill",
+        quantity=-Decimal(str(data.quantity)),
+        rate=data.rate,
+    )
+    db.add(movement)
+    commit_transaction(db, "Failed to record stock delivery")
+    db.refresh(movement)
     return movement
 
 
@@ -1500,25 +1591,50 @@ def my_stock(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_commissiondar)
 ):
-    on_hand = db.query(
-        func.coalesce(
-            func.sum(CommissiondarStockMovement.quantity),
-            0
-        )
+    query = db.query(CommissiondarStockMovement).filter(
+        CommissiondarStockMovement.commissiondar_id == current_user.party_id,
+        CommissiondarStockMovement.is_void == False
+    )
+    received = db.query(func.coalesce(func.sum(CommissiondarStockMovement.quantity), 0)).filter(
+        CommissiondarStockMovement.commissiondar_id == current_user.party_id,
+        CommissiondarStockMovement.movement_type == "received_from_farmer",
+        CommissiondarStockMovement.is_void == False
+    ).scalar() or 0
+    delivered = db.query(func.coalesce(func.sum(-CommissiondarStockMovement.quantity), 0)).filter(
+        CommissiondarStockMovement.commissiondar_id == current_user.party_id,
+        CommissiondarStockMovement.movement_type == "delivered_to_mill",
+        CommissiondarStockMovement.is_void == False
+    ).scalar() or 0
+    history = query.order_by(CommissiondarStockMovement.created_at.desc()).all()
+    stock_groups = db.query(
+        CommissiondarStockMovement.grain_type_id,
+        CommissiondarStockMovement.item_id,
+        func.sum(CommissiondarStockMovement.quantity).label("available_quantity")
     ).filter(
         CommissiondarStockMovement.commissiondar_id == current_user.party_id,
         CommissiondarStockMovement.is_void == False
-    ).scalar()
-
-    history = db.query(CommissiondarStockMovement).filter(
+    ).group_by(CommissiondarStockMovement.grain_type_id, CommissiondarStockMovement.item_id).all()
+    stock_by_type = []
+    for group in stock_groups:
+        grain = db.query(GrainType).filter(GrainType.id == group.grain_type_id).first() if group.grain_type_id else None
+        item = db.query(Item).filter(Item.id == group.item_id).first() if group.item_id else None
+        stock_by_type.append({"grain_type_id": group.grain_type_id, "item_id": group.item_id, "name": grain.name if grain else (item.name if item else "Unknown"), "unit": grain.unit if grain else (item.unit if item else None), "available_quantity": float(group.available_quantity or 0)})
+    by_mill = db.query(
+        CommissiondarStockMovement.mill_name,
+        func.sum(-CommissiondarStockMovement.quantity).label("quantity_delivered"),
+        func.count(CommissiondarStockMovement.id).label("delivery_count")
+    ).filter(
         CommissiondarStockMovement.commissiondar_id == current_user.party_id,
-        CommissiondarStockMovement.is_void == False
-    ).order_by(
-        CommissiondarStockMovement.created_at.desc()
-    ).all()
-
+        CommissiondarStockMovement.movement_type == "delivered_to_mill",
+        CommissiondarStockMovement.is_void == False,
+        CommissiondarStockMovement.mill_name.isnot(None)
+    ).group_by(CommissiondarStockMovement.mill_name).all()
     return {
-        "stock_on_hand": on_hand,
+        "total_received": float(received),
+        "total_delivered": float(delivered),
+        "stock_on_hand": float(received - delivered),
+        "stock_by_type": stock_by_type,
+        "deliveries_by_mill": [{"mill_name": row.mill_name, "quantity_delivered": float(row.quantity_delivered or 0), "delivery_count": int(row.delivery_count)} for row in by_mill],
         "history": history
     }
 
@@ -1817,6 +1933,90 @@ def reject_registration(
 
 
 # ---------------------------------------------------------------
+# Miller-owned Commissiondar contacts (not login accounts)
+# ---------------------------------------------------------------
+
+@app.post("/api/miller/commissiondars", status_code=201)
+def create_miller_commissiondar_contact(data: CommissiondarContactCreate, db: Session = Depends(get_db), current_user: User = Depends(require_owner)):
+    contact = Party(business_id=current_user.business_id, name=data.name.strip(), phone=(data.phone or None), village=(data.village or None), party_type="commissiondar", opening_balance=Decimal("0"), is_active=True)
+    db.add(contact)
+    commit_transaction(db, "Failed to create Commissiondar contact")
+    db.refresh(contact)
+    return {"id": contact.id, "name": contact.name, "phone": contact.phone, "village": contact.village}
+
+
+@app.get("/api/miller/commissiondars")
+def list_miller_commissiondar_contacts(db: Session = Depends(get_db), current_user: User = Depends(require_owner)):
+    contacts = db.query(Party).filter(Party.business_id == current_user.business_id, Party.party_type == "commissiondar").order_by(Party.name.asc()).all()
+    result = []
+    for contact in contacts:
+        movements = db.query(StockMovement).filter(StockMovement.business_id == current_user.business_id, StockMovement.broker_id == contact.id, StockMovement.movement_type == "purchase", StockMovement.is_void == False).all()
+        commissions = db.query(func.coalesce(func.sum(BrokerCommission.commission_amount), 0)).filter(BrokerCommission.business_id == current_user.business_id, BrokerCommission.commissiondar_id == contact.id, BrokerCommission.is_void == False).scalar() or 0
+        loans = db.query(MillCommissiondarLoan).filter(MillCommissiondarLoan.business_id == current_user.business_id, MillCommissiondarLoan.commissiondar_id == contact.id, MillCommissiondarLoan.is_void == False).all()
+        loan_principal = sum((Decimal(str(x.principal)) for x in loans), Decimal("0"))
+        loan_repaid = Decimal("0")
+        for loan in loans:
+            loan_repaid += Decimal(str(db.query(func.coalesce(func.sum(MillCommissiondarLoanRepayment.amount), 0)).filter(MillCommissiondarLoanRepayment.loan_id == loan.id, MillCommissiondarLoanRepayment.is_void == False).scalar() or 0))
+        result.append({"id": contact.id, "name": contact.name, "phone": contact.phone, "village": contact.village, "is_active": contact.is_active, "visit_count": len(movements), "total_packets": float(sum((m.packet_count or 0) for m in movements)), "total_quantity": float(sum((m.quantity or 0) for m in movements)), "total_commission": float(commissions), "mill_loans_count": len(loans), "mill_loans_total_principal": float(loan_principal), "mill_loans_total_repaid": float(loan_repaid), "mill_loans_outstanding_principal": float(loan_principal - loan_repaid)})
+    return result
+
+
+@app.put("/api/miller/commissiondars/{contact_id}")
+def update_miller_commissiondar_contact(contact_id: int, data: CommissiondarContactUpdate, db: Session = Depends(get_db), current_user: User = Depends(require_owner)):
+    contact = db.query(Party).filter(Party.id == contact_id, Party.business_id == current_user.business_id, Party.party_type == "commissiondar").first()
+    if not contact:
+        raise HTTPException(status_code=404, detail="Commissiondar contact not found")
+    for field in ("name", "phone", "village", "is_active"):
+        value = getattr(data, field)
+        if value is not None:
+            setattr(contact, field, value.strip() if isinstance(value, str) else value)
+    commit_transaction(db, "Failed to update Commissiondar contact")
+    return {"id": contact.id, "name": contact.name, "phone": contact.phone, "village": contact.village, "is_active": contact.is_active}
+
+
+@app.get("/api/miller/commissiondars/{contact_id}")
+def get_miller_commissiondar_contact(contact_id: int, db: Session = Depends(get_db), current_user: User = Depends(require_owner)):
+    contact = db.query(Party).filter(Party.id == contact_id, Party.business_id == current_user.business_id, Party.party_type == "commissiondar").first()
+    if not contact:
+        raise HTTPException(status_code=404, detail="Commissiondar contact not found")
+    return {"contact": {"id": contact.id, "name": contact.name}, "intakes": db.query(StockMovement).filter(StockMovement.business_id == current_user.business_id, StockMovement.broker_id == contact.id, StockMovement.is_void == False).order_by(StockMovement.moved_at.desc()).all(), "loans": db.query(MillCommissiondarLoan).filter(MillCommissiondarLoan.business_id == current_user.business_id, MillCommissiondarLoan.commissiondar_id == contact.id, MillCommissiondarLoan.is_void == False).all()}
+
+
+# ---------------------------------------------------------------
+# Commissiondar-owned farmer and grain management
+# ---------------------------------------------------------------
+
+@app.get("/api/commissiondar/farmers")
+def list_commissiondar_farmers(db: Session = Depends(get_db), current_user: User = Depends(require_commissiondar)):
+    farmers = db.query(Party).filter(Party.business_id == current_user.business_id, Party.party_type == "farmer", Party.is_active == True).order_by(Party.name.asc()).all()
+    return [{"id": f.id, "name": f.name, "phone": f.phone, "village": f.village} for f in farmers]
+
+
+@app.post("/api/commissiondar/farmers", status_code=201)
+def create_commissiondar_farmer(data: CommissiondarFarmerCreate, db: Session = Depends(get_db), current_user: User = Depends(require_commissiondar)):
+    farmer = Party(business_id=current_user.business_id, name=data.name.strip(), phone=data.phone, village=(data.village or None), party_type="farmer", opening_balance=Decimal("0"), is_active=True)
+    db.add(farmer)
+    commit_transaction(db, "Failed to create Commissiondar farmer")
+    db.refresh(farmer)
+    return {"id": farmer.id, "name": farmer.name, "phone": farmer.phone, "village": farmer.village}
+
+
+@app.get("/api/commissiondar/grain-types")
+def list_commissiondar_grain_types(db: Session = Depends(get_db), current_user: User = Depends(require_commissiondar)):
+    rows = db.query(GrainType).filter(GrainType.is_active == True, ((GrainType.owner_business_id == current_user.business_id) | (GrainType.owner_business_id.is_(None)))).order_by(GrainType.name.asc()).all()
+    return [{"id": x.id, "name": x.name, "unit": x.unit} for x in rows]
+
+
+@app.post("/api/commissiondar/grain-types", status_code=201)
+def create_commissiondar_grain_type(data: GrainTypeCreate, db: Session = Depends(get_db), current_user: User = Depends(require_commissiondar)):
+    grain = GrainType(name=data.name.strip(), unit=data.unit.strip(), owner_business_id=current_user.business_id, created_by_user_id=current_user.id, is_active=True)
+    db.add(grain)
+    commit_transaction(db, "Failed to create grain type")
+    db.refresh(grain)
+    return {"id": grain.id, "name": grain.name, "unit": grain.unit}
+
+
+# ---------------------------------------------------------------
 # Items
 # ---------------------------------------------------------------
 
@@ -1871,9 +2071,15 @@ def list_farmers(
             current_user.business_id
         )
 
+        associated_contact = None
+        if farmer.associated_commissiondar_id:
+            associated_contact = db.query(Party).filter(Party.id == farmer.associated_commissiondar_id, Party.business_id == current_user.business_id, Party.party_type == "commissiondar").first()
         result.append({
             "id": farmer.id,
             "name": farmer.name,
+            "village": farmer.village,
+            "associated_commissiondar_id": farmer.associated_commissiondar_id,
+            "associated_commissiondar_name": associated_contact.name if associated_contact else None,
             "owed": float(owed)
         })
 
@@ -1896,11 +2102,18 @@ def create_farmer(
             detail="Farmer name and village cannot be empty"
         )
 
+    associated_id = data.associated_commissiondar_id
+    if associated_id is not None:
+        contact = db.query(Party).filter(Party.id == associated_id, Party.business_id == current_user.business_id, Party.party_type == "commissiondar", Party.is_active == True).first()
+        if not contact:
+            raise HTTPException(status_code=404, detail="Commissiondar contact not found in this mill account")
+
     try:
         farmer = Party(
             business_id=current_user.business_id,
             name=name,
             village=village,
+            associated_commissiondar_id=associated_id,
             party_type="farmer",
             opening_balance=Decimal("0"),
             is_active=True
@@ -1921,5 +2134,35 @@ def create_farmer(
         "id": farmer.id,
         "name": farmer.name,
         "village": farmer.village,
+        "associated_commissiondar_id": farmer.associated_commissiondar_id,
         "owed": 0.0
     }
+
+@app.put("/api/farmers/{farmer_id}")
+def update_farmer(farmer_id: int, data: FarmerUpdate, db: Session = Depends(get_db), current_user: User = Depends(require_owner)):
+    farmer = db.query(Party).filter(Party.id == farmer_id, Party.business_id == current_user.business_id, Party.party_type == "farmer", Party.is_active == True).first()
+    if "associated_commissiondar_id" in data.model_fields_set:
+        if data.associated_commissiondar_id is None:
+            # Explicit null means remove the association.
+            farmer.associated_commissiondar_id = None
+        else:
+            contact = db.query(Party).filter(
+                Party.id == data.associated_commissiondar_id,
+                Party.business_id == current_user.business_id,
+                Party.party_type == "commissiondar",
+                Party.is_active == True
+            ).first()
+
+            if not contact:
+                raise HTTPException(
+                    status_code=404,
+                    detail="Commissiondar contact not found in this mill account"
+                )
+
+            farmer.associated_commissiondar_id = contact.id
+    if data.name is not None:
+        farmer.name = data.name.strip()
+    if data.village is not None:
+        farmer.village = data.village.strip()
+    commit_transaction(db, "Failed to update farmer")
+    return {"id": farmer.id, "name": farmer.name, "village": farmer.village, "associated_commissiondar_id": farmer.associated_commissiondar_id}

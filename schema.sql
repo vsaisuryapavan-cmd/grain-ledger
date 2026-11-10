@@ -6,7 +6,7 @@
 CREATE TABLE businesses (
     id            BIGSERIAL PRIMARY KEY,
     name          TEXT NOT NULL,
-    business_type TEXT NOT NULL CHECK (business_type IN ('mill', 'store')),
+    business_type TEXT NOT NULL CHECK (business_type IN ('mill', 'store', 'commissiondar', 'system')),
     phone         TEXT,
     address       TEXT,
     created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
@@ -19,8 +19,11 @@ CREATE TABLE users (
     phone                TEXT NOT NULL UNIQUE,
     password_hash        VARCHAR(255),
     second_password_hash VARCHAR(255),
-    role                 TEXT NOT NULL CHECK (role IN ('owner', 'staff', 'party')),
+    role                 TEXT NOT NULL CHECK (role IN ('owner', 'staff', 'party', 'admin')),
     party_id             BIGINT,
+    approval_status      TEXT NOT NULL DEFAULT 'pending' CHECK (approval_status IN ('pending', 'approved', 'rejected')),
+    reviewed_by          BIGINT REFERENCES users(id),
+    reviewed_at          TIMESTAMPTZ,
     created_at           TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
@@ -41,6 +44,7 @@ CREATE TABLE parties (
     phone           TEXT,
     village         TEXT,
     party_type      TEXT NOT NULL CHECK (party_type IN ('farmer', 'customer', 'supplier', 'buyer', 'commissiondar')),
+    associated_commissiondar_id BIGINT REFERENCES parties(id),
     opening_balance NUMERIC(14,2) NOT NULL DEFAULT 0,  -- +ve = party owes us, -ve = we owe party
     is_active       BOOLEAN NOT NULL DEFAULT TRUE,
     created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
@@ -77,6 +81,11 @@ CREATE TABLE stock_movements (
     quantity      NUMERIC(14,3) NOT NULL CHECK (quantity <> 0),
     rate          NUMERIC(12,2),               -- price per unit at that time
     moisture_pct  NUMERIC(5,2),                -- paddy intake only
+    packet_count NUMERIC(14,3),
+    packet_price NUMERIC(12,2),
+    commission_type TEXT CHECK (commission_type IS NULL OR commission_type IN ('fixed', 'percentage')),
+    commission_rate NUMERIC(12,2),
+    commission_per_packet NUMERIC(12,2),
     moved_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
     note          TEXT,
     created_by    BIGINT REFERENCES users(id),
@@ -137,6 +146,11 @@ CREATE TABLE broker_commissions (
     farmer_id          BIGINT REFERENCES parties(id),               -- original farmer, for traceability only
     movement_id        BIGINT REFERENCES stock_movements(id),       -- the intake this commission is for
     commission_amount  NUMERIC(12,2) NOT NULL CHECK (commission_amount >= 0),
+    packet_count NUMERIC(14,3),
+    packet_price NUMERIC(12,2),
+    commission_type TEXT CHECK (commission_type IS NULL OR commission_type IN ('fixed', 'percentage')),
+    commission_rate NUMERIC(12,2),
+    commission_per_packet NUMERIC(12,2),
     is_paid            BOOLEAN NOT NULL DEFAULT FALSE,
     created_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
     is_void            BOOLEAN NOT NULL DEFAULT FALSE
@@ -273,3 +287,47 @@ CREATE INDEX idx_payments_party     ON payments(business_id, party_id);
 -- FROM items i JOIN stock_movements m ON m.item_id = i.id AND NOT m.is_void
 -- WHERE i.business_id = :biz
 -- GROUP BY i.id HAVING SUM(m.quantity) <= i.reorder_level;
+
+
+-- Independent Commissiondar grain catalogue and stock ledger.
+CREATE TABLE IF NOT EXISTS grain_types (
+    id BIGSERIAL PRIMARY KEY,
+    name TEXT NOT NULL,
+    unit TEXT NOT NULL DEFAULT 'quintal',
+    owner_business_id BIGINT REFERENCES businesses(id) ON DELETE RESTRICT,
+    created_by_user_id BIGINT REFERENCES users(id) ON DELETE SET NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    is_active BOOLEAN NOT NULL DEFAULT TRUE,
+    CHECK (length(trim(name)) > 0),
+    CHECK (length(trim(unit)) > 0)
+);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_grain_types_global_name ON grain_types (lower(name)) WHERE owner_business_id IS NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS uq_grain_types_business_name ON grain_types (owner_business_id, lower(name)) WHERE owner_business_id IS NOT NULL;
+
+CREATE TABLE IF NOT EXISTS commissiondar_stock_movements (
+    id BIGSERIAL PRIMARY KEY,
+    commissiondar_id BIGINT NOT NULL REFERENCES parties(id),
+    farmer_id BIGINT REFERENCES parties(id),
+    business_id BIGINT REFERENCES businesses(id),
+    item_id BIGINT REFERENCES items(id),
+    grain_type_id BIGINT REFERENCES grain_types(id) ON DELETE RESTRICT,
+    movement_type TEXT NOT NULL CHECK (movement_type IN ('received_from_farmer', 'delivered_to_mill')),
+    mill_name VARCHAR(200),
+    quantity NUMERIC(14,3) NOT NULL CHECK (quantity <> 0),
+    rate NUMERIC(12,2),
+    movement_id BIGINT REFERENCES stock_movements(id),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    is_void BOOLEAN NOT NULL DEFAULT FALSE,
+    CHECK (item_id IS NOT NULL OR grain_type_id IS NOT NULL)
+);
+CREATE INDEX IF NOT EXISTS idx_commissiondar_stock_owner ON commissiondar_stock_movements(commissiondar_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_commissiondar_stock_mill ON commissiondar_stock_movements(commissiondar_id, mill_name);
+
+CREATE TABLE IF NOT EXISTS login_logs (
+    id BIGSERIAL PRIMARY KEY, phone TEXT NOT NULL, user_id BIGINT REFERENCES users(id),
+    success BOOLEAN NOT NULL, created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE TABLE IF NOT EXISTS issue_reports (
+    id BIGSERIAL PRIMARY KEY, user_id BIGINT REFERENCES users(id), description TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'open', created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
