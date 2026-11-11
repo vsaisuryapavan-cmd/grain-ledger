@@ -1115,6 +1115,51 @@ def test_commissiondar_can_manage_own_farmers_and_independent_stock_delivery():
     )
     assert grain.status_code == 201, grain.text
     grain_type_id = grain.json()["id"]
+    # Reject both catalogue IDs together.
+    both_receive = client.post(
+        "/api/commissiondar-stock/receive",
+        json={
+            "farmer_id": farmer_id,
+            "grain_type_id": grain_type_id,
+            "item_id": 2,
+            "quantity": 5,
+        },
+        headers=headers,
+    )
+    assert both_receive.status_code == 400
+
+    both_deliver = client.post(
+        "/api/commissiondar-stock/deliver",
+        json={
+            "mill_name": "Manual Test Mill",
+            "grain_type_id": grain_type_id,
+            "item_id": 2,
+            "quantity": 5,
+        },
+        headers=headers,
+    )
+    assert both_deliver.status_code == 400
+
+    # Reject requests without either catalogue ID.
+    neither_receive = client.post(
+        "/api/commissiondar-stock/receive",
+        json={
+            "farmer_id": farmer_id,
+            "quantity": 5,
+        },
+        headers=headers,
+    )
+    assert neither_receive.status_code == 400
+
+    neither_deliver = client.post(
+        "/api/commissiondar-stock/deliver",
+        json={
+            "mill_name": "Manual Test Mill",
+            "quantity": 5,
+        },
+        headers=headers,
+    )
+    assert neither_deliver.status_code == 400
 
     received = client.post(
         "/api/commissiondar-stock/receive",

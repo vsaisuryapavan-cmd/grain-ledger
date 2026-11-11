@@ -1499,6 +1499,11 @@ def receive_from_farmer(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_commissiondar)
 ):
+    if (data.grain_type_id is None) == (data.item_id is None):
+        raise HTTPException(
+            status_code=400,
+            detail="Provide exactly one of grain_type_id or item_id"
+        )
     farmer = db.query(Party).filter(
         Party.id == data.farmer_id,
         Party.business_id == current_user.business_id,
@@ -1549,6 +1554,11 @@ def deliver_to_mill(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_commissiondar)
 ):
+    if (data.grain_type_id is None) == (data.item_id is None):
+        raise HTTPException(
+            status_code=400,
+            detail="Provide exactly one of grain_type_id or item_id"
+        )
     mill_name = data.mill_name.strip()
     if not mill_name:
         raise HTTPException(status_code=400, detail="Mill name cannot be empty")
