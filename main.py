@@ -49,8 +49,9 @@ app = FastAPI()
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
-        "https://rice-mill-ledger.onrender.com",
-    ],
+    "http://localhost:5173",
+    "https://YOUR-DEPLOYED-FRONTEND.onrender.com",
+],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
