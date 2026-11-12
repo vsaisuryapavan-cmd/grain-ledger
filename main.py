@@ -50,7 +50,7 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=[
     "http://localhost:5173",
-    "https://YOUR-DEPLOYED-FRONTEND.onrender.com",
+    "https://rice-mill-ledger.onrender.com",
 ],
     allow_credentials=True,
     allow_methods=["*"],
