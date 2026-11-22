@@ -1,4 +1,4 @@
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone, timedelta, date
 from decimal import Decimal
 import secrets
 
@@ -14,6 +14,10 @@ from models import (
     Party,
     Item,
     StockMovement,
+    CommissiondarMill,
+    CommissiondarMillFarmer,
+    CommissiondarMillCommission,
+    CommissiondarMillCommissionReceipt,
     LedgerEntry,
     Payment,
     User,
@@ -90,6 +94,25 @@ class CommissiondarFarmerCreate(BaseModel):
     name: str = Field(min_length=1, max_length=150)
     village: str | None = Field(default=None, max_length=150)
     phone: str | None = Field(default=None, max_length=20)
+class CommissiondarMillCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=200)
+
+
+class CommissiondarMillUpdate(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=200)
+    is_active: bool | None = None
+
+class CommissiondarMillCommissionCreate(BaseModel):
+    commission_amount: Decimal = Field(gt=0)
+    earned_at: date | None = None
+    note: str | None = None
+
+
+class CommissiondarMillCommissionReceiptCreate(BaseModel):
+    amount: Decimal = Field(gt=0)
+    received_at: date | None = None
+    note: str | None = None
+
 
 
 class GrainTypeCreate(BaseModel):
@@ -1228,11 +1251,15 @@ def repay_loan(
     return repayment
 
 
+
 @app.get("/api/commissiondar-dashboard")
 def commissiondar_dashboard(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_commissiondar)
 ):
+    # -----------------------------------------
+    # Existing Commissiondar loan calculations
+    # -----------------------------------------
     loans = db.query(CommissiondarLoan).filter(
         CommissiondarLoan.commissiondar_id == current_user.party_id,
         CommissiondarLoan.is_void == False
@@ -1242,7 +1269,7 @@ def commissiondar_dashboard(
         float(loan.principal) for loan in loans
     )
 
-    total_outstanding = 0
+    total_outstanding = 0.0
 
     for loan in loans:
         days_elapsed = max(
@@ -1274,30 +1301,127 @@ def commissiondar_dashboard(
             - float(repaid or 0)
         )
 
-    # Miller-side commission records are intentionally not read here. The two
-    # business accounts are independent; pending commission is zero until the
-    # Commissiondar records its own commission receivables in its own account.
-    commissions_pending = 0.0
+    # -----------------------------------------
+    # Commissiondar's own mill commission ledger
+    # -----------------------------------------
+    commissions = db.query(CommissiondarMillCommission).filter(
+        CommissiondarMillCommission.commissiondar_id == current_user.party_id,
+        CommissiondarMillCommission.is_void == False
+    ).all()
+
+    total_commissions_earned = 0.0
+    total_commissions_received = 0.0
+    latest_commission = None
+
+    for commission in commissions:
+        received = db.query(
+            func.coalesce(
+                func.sum(CommissiondarMillCommissionReceipt.amount),
+                0
+            )
+        ).filter(
+            CommissiondarMillCommissionReceipt.commission_id == commission.id,
+            CommissiondarMillCommissionReceipt.commissiondar_id == current_user.party_id,
+            CommissiondarMillCommissionReceipt.is_void == False
+        ).scalar()
+
+        earned_amount = float(commission.commission_amount)
+        received_amount = float(received or 0)
+        pending_amount = earned_amount - received_amount
+
+        total_commissions_earned += earned_amount
+        total_commissions_received += received_amount
+
+        if (
+            latest_commission is None
+            or (commission.earned_at, commission.id)
+            > (latest_commission["_sort_date"], latest_commission["id"])
+        ):
+            latest_commission = {
+                "id": commission.id,
+                "mill_id": commission.mill_id,
+                "commission_amount": round(earned_amount, 2),
+                "received_amount": round(received_amount, 2),
+                "pending_amount": round(pending_amount, 2),
+                "earned_at": str(commission.earned_at),
+                "note": commission.note,
+                "_sort_date": commission.earned_at
+            }
+
+    if latest_commission:
+        latest_commission.pop("_sort_date")
+
+    commissions_pending = (
+        total_commissions_earned - total_commissions_received
+    )
+
+    # -----------------------------------------
+    # Existing farmer count
+    # -----------------------------------------
     farmer_count = db.query(func.count(Party.id)).filter(
         Party.business_id == current_user.business_id,
         Party.party_type == "farmer",
         Party.is_active == True
     ).scalar() or 0
+
+    # -----------------------------------------
+    # Commissiondar's own mills and associations
+    # -----------------------------------------
+    active_mills = db.query(CommissiondarMill).filter(
+        CommissiondarMill.commissiondar_id == current_user.party_id,
+        CommissiondarMill.business_id == current_user.business_id,
+        CommissiondarMill.is_active == True
+    ).all()
+
+    total_mills = len(active_mills)
+
+    associated_farmer_count = db.query(
+        func.count(func.distinct(CommissiondarMillFarmer.farmer_id))
+    ).filter(
+        CommissiondarMillFarmer.commissiondar_id == current_user.party_id,
+        CommissiondarMillFarmer.is_active == True
+    ).scalar() or 0
+
+    # -----------------------------------------
+    # Latest loan
+    # -----------------------------------------
     latest_loan = db.query(CommissiondarLoan).filter(
         CommissiondarLoan.commissiondar_id == current_user.party_id,
         CommissiondarLoan.is_void == False
-    ).order_by(CommissiondarLoan.issued_at.desc(), CommissiondarLoan.id.desc()).first()
+    ).order_by(
+        CommissiondarLoan.issued_at.desc(),
+        CommissiondarLoan.id.desc()
+    ).first()
 
-
+    # -----------------------------------------
+    # Dashboard response
+    # -----------------------------------------
     return {
         "active_loans": len(loans),
         "total_lent_out": round(total_lent, 2),
         "total_outstanding": round(total_outstanding, 2),
-        "commissions_pending": commissions_pending,
+
+        "commissions_earned": round(total_commissions_earned, 2),
+        "commissions_received": round(total_commissions_received, 2),
+        "commissions_pending": round(commissions_pending, 2),
+
         "total_farmers": farmer_count,
-        "latest_loan": ({"id": latest_loan.id, "farmer_id": latest_loan.farmer_id, "principal": float(latest_loan.principal), "issued_at": str(latest_loan.issued_at)} if latest_loan else None),
-        "latest_commission": None,
+        "total_mills": total_mills,
+        "associated_farmers": associated_farmer_count,
+
+        "latest_loan": (
+            {
+                "id": latest_loan.id,
+                "farmer_id": latest_loan.farmer_id,
+                "principal": float(latest_loan.principal),
+                "issued_at": str(latest_loan.issued_at)
+            }
+            if latest_loan else None
+        ),
+
+        "latest_commission": latest_commission
     }
+
 
 
 # ---------------------------------------------------------------
@@ -1963,13 +2087,66 @@ def list_miller_commissiondar_contacts(db: Session = Depends(get_db), current_us
     for contact in contacts:
         movements = db.query(StockMovement).filter(StockMovement.business_id == current_user.business_id, StockMovement.broker_id == contact.id, StockMovement.movement_type == "purchase", StockMovement.is_void == False).all()
         commissions = db.query(func.coalesce(func.sum(BrokerCommission.commission_amount), 0)).filter(BrokerCommission.business_id == current_user.business_id, BrokerCommission.commissiondar_id == contact.id, BrokerCommission.is_void == False).scalar() or 0
+        paid_commissions = db.query(
+            func.coalesce(func.sum(BrokerCommission.commission_amount), 0)
+        ).filter(
+            BrokerCommission.business_id == current_user.business_id,
+            BrokerCommission.commissiondar_id == contact.id,
+            BrokerCommission.is_paid == True,
+            BrokerCommission.is_void == False
+        ).scalar() or 0
+
+        associated_farmers = db.query(Party.id).filter(
+            Party.business_id == current_user.business_id,
+            Party.party_type == "farmer",
+            Party.associated_commissiondar_id == contact.id
+        ).all()
+
+        farmer_ids = {
+            movement.party_id
+            for movement in movements
+            if movement.party_id is not None
+        }
+        farmer_ids.update(row[0] for row in associated_farmers)
+
+        commission_farmer_ids = db.query(BrokerCommission.farmer_id).filter(
+            BrokerCommission.business_id == current_user.business_id,
+            BrokerCommission.commissiondar_id == contact.id,
+            BrokerCommission.is_void == False,
+            BrokerCommission.farmer_id.isnot(None)
+        ).all()
+
+        farmer_ids.update(row[0] for row in commission_farmer_ids)
         loans = db.query(MillCommissiondarLoan).filter(MillCommissiondarLoan.business_id == current_user.business_id, MillCommissiondarLoan.commissiondar_id == contact.id, MillCommissiondarLoan.is_void == False).all()
         loan_principal = sum((Decimal(str(x.principal)) for x in loans), Decimal("0"))
         loan_repaid = Decimal("0")
         for loan in loans:
             loan_repaid += Decimal(str(db.query(func.coalesce(func.sum(MillCommissiondarLoanRepayment.amount), 0)).filter(MillCommissiondarLoanRepayment.loan_id == loan.id, MillCommissiondarLoanRepayment.is_void == False).scalar() or 0))
-        result.append({"id": contact.id, "name": contact.name, "phone": contact.phone, "village": contact.village, "is_active": contact.is_active, "visit_count": len(movements), "total_packets": float(sum((m.packet_count or 0) for m in movements)), "total_quantity": float(sum((m.quantity or 0) for m in movements)), "total_commission": float(commissions), "mill_loans_count": len(loans), "mill_loans_total_principal": float(loan_principal), "mill_loans_total_repaid": float(loan_repaid), "mill_loans_outstanding_principal": float(loan_principal - loan_repaid)})
+        result.append({
+            "id": contact.id,
+            "name": contact.name,
+            "phone": contact.phone,
+            "village": contact.village,
+            "is_active": contact.is_active,
+
+            "visit_count": len(movements),
+            "total_packets": float(sum((m.packet_count or 0) for m in movements)),
+            "total_quantity": float(sum((m.quantity or 0) for m in movements)),
+
+            # Commission summary
+            "total_farmers": len(farmer_ids),
+            "total_commission": float(commissions),
+            "commission_paid": float(paid_commissions),
+            "commission_outstanding": float(commissions) - float(paid_commissions),
+
+            # Miller-to-Commissiondar loans
+            "mill_loans_count": len(loans),
+            "mill_loans_total_principal": float(loan_principal),
+            "mill_loans_total_repaid": float(loan_repaid),
+            "mill_loans_outstanding_principal": float(loan_principal - loan_repaid)
+        })
     return result
+
 
 
 @app.put("/api/miller/commissiondars/{contact_id}")
@@ -1985,12 +2162,195 @@ def update_miller_commissiondar_contact(contact_id: int, data: CommissiondarCont
     return {"id": contact.id, "name": contact.name, "phone": contact.phone, "village": contact.village, "is_active": contact.is_active}
 
 
+
 @app.get("/api/miller/commissiondars/{contact_id}")
-def get_miller_commissiondar_contact(contact_id: int, db: Session = Depends(get_db), current_user: User = Depends(require_owner)):
-    contact = db.query(Party).filter(Party.id == contact_id, Party.business_id == current_user.business_id, Party.party_type == "commissiondar").first()
+def get_miller_commissiondar_contact(
+    contact_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_owner)
+):
+    contact = db.query(Party).filter(
+        Party.id == contact_id,
+        Party.business_id == current_user.business_id,
+        Party.party_type == "commissiondar"
+    ).first()
+
     if not contact:
-        raise HTTPException(status_code=404, detail="Commissiondar contact not found")
-    return {"contact": {"id": contact.id, "name": contact.name}, "intakes": db.query(StockMovement).filter(StockMovement.business_id == current_user.business_id, StockMovement.broker_id == contact.id, StockMovement.is_void == False).order_by(StockMovement.moved_at.desc()).all(), "loans": db.query(MillCommissiondarLoan).filter(MillCommissiondarLoan.business_id == current_user.business_id, MillCommissiondarLoan.commissiondar_id == contact.id, MillCommissiondarLoan.is_void == False).all()}
+        raise HTTPException(
+            status_code=404,
+            detail="Commissiondar contact not found"
+        )
+
+    business_id = current_user.business_id
+
+    # 1. Get all valid purchase movements for this contact
+    movements = db.query(StockMovement).filter(
+        StockMovement.business_id == business_id,
+        StockMovement.broker_id == contact.id,
+        StockMovement.movement_type == "purchase",
+        StockMovement.is_void == False
+    ).order_by(
+        StockMovement.moved_at.desc()
+    ).all()
+
+    # 2. Get all commission records for this contact
+    commissions = db.query(BrokerCommission).filter(
+        BrokerCommission.business_id == business_id,
+        BrokerCommission.commissiondar_id == contact.id,
+        BrokerCommission.is_void == False
+    ).all()
+
+    # 3. Collect farmer IDs from associations, intakes and commissions
+    farmer_ids = {
+        farmer.id
+        for farmer in db.query(Party).filter(
+            Party.business_id == business_id,
+            Party.party_type == "farmer",
+            Party.associated_commissiondar_id == contact.id
+        ).all()
+    }
+
+    farmer_ids.update(
+        movement.party_id
+        for movement in movements
+        if movement.party_id is not None
+    )
+
+    farmer_ids.update(
+        commission.farmer_id
+        for commission in commissions
+        if commission.farmer_id is not None
+    )
+
+    # 4. Fetch farmers belonging to this Miller business
+    farmers = db.query(Party).filter(
+        Party.business_id == business_id,
+        Party.party_type == "farmer",
+        Party.id.in_(farmer_ids)
+    ).all() if farmer_ids else []
+
+    farmer_map = {
+        farmer.id: farmer
+        for farmer in farmers
+    }
+
+    # 5. Group intake movements by farmer
+    farmer_movements = {}
+
+    for movement in movements:
+        farmer_id = movement.party_id
+
+        if farmer_id is not None:
+            farmer_movements.setdefault(
+                farmer_id, []
+            ).append(movement)
+
+    # 6. Group commissions by farmer
+    farmer_commissions = {}
+
+    for commission in commissions:
+        farmer_id = commission.farmer_id
+
+        if farmer_id is not None:
+            farmer_commissions.setdefault(
+                farmer_id, []
+            ).append(commission)
+
+    farmer_reports = []
+
+    total_quantity = Decimal("0")
+    total_commission = Decimal("0")
+    total_commission_paid = Decimal("0")
+
+    for farmer_id in farmer_ids:
+        farmer = farmer_map.get(farmer_id)
+
+        if not farmer:
+            continue
+
+        farmer_intakes = farmer_movements.get(
+            farmer_id, []
+        )
+
+        farmer_quantity = sum(
+            (
+                Decimal(str(m.quantity or 0))
+                for m in farmer_intakes
+            ),
+            Decimal("0")
+        )
+
+        farmer_commission_records = farmer_commissions.get(
+            farmer_id, []
+        )
+
+        earned = sum(
+            (
+                Decimal(str(c.commission_amount or 0))
+                for c in farmer_commission_records
+            ),
+            Decimal("0")
+        )
+
+        paid = sum(
+            (
+                Decimal(str(c.commission_amount or 0))
+                for c in farmer_commission_records
+                if c.is_paid
+            ),
+            Decimal("0")
+        )
+
+        outstanding = earned - paid
+
+        total_quantity += farmer_quantity
+        total_commission += earned
+        total_commission_paid += paid
+
+        farmer_reports.append({
+            "farmer_id": farmer.id,
+            "farmer_name": farmer.name,
+            "village": farmer.village,
+            "total_intakes": len(farmer_intakes),
+            "total_quantity": float(farmer_quantity),
+            "commission_earned": float(earned),
+            "commission_paid": float(paid),
+            "commission_outstanding": float(outstanding),
+            "intakes": farmer_intakes
+        })
+
+    # 7. Calculate remaining commission
+    total_outstanding = (
+        total_commission - total_commission_paid
+    )
+
+    # 8. Preserve existing Miller-to-Commissiondar loans
+    loans = db.query(MillCommissiondarLoan).filter(
+        MillCommissiondarLoan.business_id == business_id,
+        MillCommissiondarLoan.commissiondar_id == contact.id,
+        MillCommissiondarLoan.is_void == False
+    ).all()
+
+    return {
+        "contact": {
+            "id": contact.id,
+            "name": contact.name,
+            "phone": contact.phone,
+            "village": contact.village,
+            "is_active": contact.is_active
+        },
+        "summary": {
+            "total_farmers": len(farmer_reports),
+            "total_intakes": len(movements),
+            "total_quantity": float(total_quantity),
+            "total_commission": float(total_commission),
+            "commission_paid": float(total_commission_paid),
+            "commission_outstanding": float(total_outstanding)
+        },
+        "farmers": farmer_reports,
+        "intakes": movements,
+        "loans": loans
+    }
 
 
 # ---------------------------------------------------------------
@@ -2025,6 +2385,390 @@ def create_commissiondar_grain_type(data: GrainTypeCreate, db: Session = Depends
     commit_transaction(db, "Failed to create grain type")
     db.refresh(grain)
     return {"id": grain.id, "name": grain.name, "unit": grain.unit}
+
+
+# ---------------------------------------------------------------
+# Commissiondar: Farmers associated with My Mills
+# ---------------------------------------------------------------
+
+@app.get("/api/commissiondar/mills/{mill_id}/farmers")
+def list_farmers_for_commissiondar_mill(
+    mill_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_commissiondar)
+):
+    # Confirm that this mill belongs to the logged-in Commissiondar.
+    mill = db.query(CommissiondarMill).filter(
+        CommissiondarMill.id == mill_id,
+        CommissiondarMill.commissiondar_id == current_user.party_id,
+        CommissiondarMill.business_id == current_user.business_id
+    ).first()
+
+    if not mill:
+        raise HTTPException(status_code=404, detail="Mill not found")
+
+    associations = (
+        db.query(CommissiondarMillFarmer, Party)
+        .join(
+            Party,
+            Party.id == CommissiondarMillFarmer.farmer_id
+        )
+        .filter(
+            CommissiondarMillFarmer.mill_id == mill_id,
+            CommissiondarMillFarmer.commissiondar_id == current_user.party_id,
+            CommissiondarMillFarmer.is_active == True,
+            Party.business_id == current_user.business_id,
+            Party.party_type == "farmer",
+            Party.is_active == True
+        )
+        .order_by(Party.name.asc())
+        .all()
+    )
+
+    return {
+        "mill_id": mill.id,
+        "mill_name": mill.name,
+        "farmer_count": len(associations),
+        "farmers": [
+            {
+                "id": farmer.id,
+                "name": farmer.name,
+                "phone": farmer.phone,
+                "village": farmer.village
+            }
+            for association, farmer in associations
+        ]
+    }
+
+
+@app.post("/api/commissiondar/mills/{mill_id}/farmers/{farmer_id}", status_code=201)
+def add_farmer_to_commissiondar_mill(
+    mill_id: int,
+    farmer_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_commissiondar)
+):
+    # The mill must belong to this Commissiondar and be active.
+    mill = db.query(CommissiondarMill).filter(
+        CommissiondarMill.id == mill_id,
+        CommissiondarMill.commissiondar_id == current_user.party_id,
+        CommissiondarMill.business_id == current_user.business_id,
+        CommissiondarMill.is_active == True
+    ).first()
+
+    if not mill:
+        raise HTTPException(status_code=404, detail="Active mill not found")
+
+    # The farmer must belong to this Commissiondar's own directory.
+    farmer = db.query(Party).filter(
+        Party.id == farmer_id,
+        Party.business_id == current_user.business_id,
+        Party.party_type == "farmer",
+        Party.is_active == True
+    ).first()
+
+    if not farmer:
+        raise HTTPException(
+            status_code=404,
+            detail="Farmer not found in your farmer directory"
+        )
+
+    association = db.query(CommissiondarMillFarmer).filter(
+        CommissiondarMillFarmer.mill_id == mill_id,
+        CommissiondarMillFarmer.farmer_id == farmer_id,
+        CommissiondarMillFarmer.commissiondar_id == current_user.party_id
+    ).first()
+
+    if association and association.is_active:
+        raise HTTPException(
+            status_code=409,
+            detail="Farmer is already associated with this mill"
+        )
+
+    if association:
+        # Reactivate a previously removed association.
+        association.is_active = True
+    else:
+        association = CommissiondarMillFarmer(
+            commissiondar_id=current_user.party_id,
+            mill_id=mill_id,
+            farmer_id=farmer_id,
+            is_active=True
+        )
+        db.add(association)
+
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(
+            status_code=409,
+            detail="Farmer is already associated with this mill"
+        )
+    except Exception:
+        db.rollback()
+        raise HTTPException(
+            status_code=500,
+            detail="Failed to associate farmer with mill"
+        )
+
+    return {
+        "mill_id": mill_id,
+        "mill_name": mill.name,
+        "farmer_id": farmer.id,
+        "farmer_name": farmer.name,
+        "message": "Farmer associated with mill successfully"
+    }
+
+
+@app.delete("/api/commissiondar/mills/{mill_id}/farmers/{farmer_id}")
+def remove_farmer_from_commissiondar_mill(
+    mill_id: int,
+    farmer_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_commissiondar)
+):
+    # Confirm ownership of the mill.
+    mill = db.query(CommissiondarMill).filter(
+        CommissiondarMill.id == mill_id,
+        CommissiondarMill.commissiondar_id == current_user.party_id,
+        CommissiondarMill.business_id == current_user.business_id
+    ).first()
+
+    if not mill:
+        raise HTTPException(status_code=404, detail="Mill not found")
+
+    association = db.query(CommissiondarMillFarmer).filter(
+        CommissiondarMillFarmer.mill_id == mill_id,
+        CommissiondarMillFarmer.farmer_id == farmer_id,
+        CommissiondarMillFarmer.commissiondar_id == current_user.party_id,
+        CommissiondarMillFarmer.is_active == True
+    ).first()
+
+    if not association:
+        raise HTTPException(
+            status_code=404,
+            detail="Active farmer association not found"
+        )
+
+    # Remove only the association, never the farmer directory record.
+    association.is_active = False
+
+    commit_transaction(
+        db,
+        "Failed to remove farmer from mill"
+    )
+
+    return {
+        "mill_id": mill_id,
+        "farmer_id": farmer_id,
+        "message": "Farmer removed from mill successfully"
+    }
+
+
+# ---------------------------------------------------------------
+# Commissiondar: My Mills
+# ---------------------------------------------------------------
+
+@app.get("/api/commissiondar/mills")
+def list_commissiondar_mills(
+    include_inactive: bool = False,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_commissiondar)
+):
+    query = db.query(CommissiondarMill).filter(
+        CommissiondarMill.commissiondar_id == current_user.party_id,
+        CommissiondarMill.business_id == current_user.business_id
+    )
+
+    if not include_inactive:
+        query = query.filter(CommissiondarMill.is_active == True)
+
+    mills = query.order_by(CommissiondarMill.name.asc()).all()
+
+    return [
+        {
+            "id": mill.id,
+            "name": mill.name,
+            "is_active": mill.is_active,
+            "created_at": mill.created_at
+        }
+        for mill in mills
+    ]
+
+
+@app.post("/api/commissiondar/mills", status_code=201)
+def create_commissiondar_mill(
+    data: CommissiondarMillCreate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_commissiondar)
+):
+    name = data.name.strip()
+
+    if not name:
+        raise HTTPException(
+            status_code=400,
+            detail="Mill name cannot be empty"
+        )
+
+    existing = db.query(CommissiondarMill).filter(
+        CommissiondarMill.commissiondar_id == current_user.party_id,
+        func.lower(CommissiondarMill.name) == name.lower()
+    ).first()
+
+    if existing:
+        raise HTTPException(
+            status_code=409,
+            detail="This mill name already exists"
+        )
+
+    mill = CommissiondarMill(
+        commissiondar_id=current_user.party_id,
+        business_id=current_user.business_id,
+        name=name,
+        is_active=True
+    )
+
+    db.add(mill)
+
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(
+            status_code=409,
+            detail="This mill name already exists"
+        )
+    except Exception:
+        db.rollback()
+        raise HTTPException(
+            status_code=500,
+            detail="Failed to create mill"
+        )
+
+    db.refresh(mill)
+
+    return {
+        "id": mill.id,
+        "name": mill.name,
+        "is_active": mill.is_active,
+        "message": "Mill added successfully"
+    }
+
+
+@app.put("/api/commissiondar/mills/{mill_id}")
+def update_commissiondar_mill(
+    mill_id: int,
+    data: CommissiondarMillUpdate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_commissiondar)
+):
+    mill = db.query(CommissiondarMill).filter(
+        CommissiondarMill.id == mill_id,
+        CommissiondarMill.commissiondar_id == current_user.party_id,
+        CommissiondarMill.business_id == current_user.business_id
+    ).first()
+
+    if not mill:
+        raise HTTPException(
+            status_code=404,
+            detail="Mill not found"
+        )
+
+    if data.name is None and data.is_active is None:
+        raise HTTPException(
+            status_code=400,
+            detail="No update fields provided"
+        )
+
+    if data.name is not None:
+        name = data.name.strip()
+
+        if not name:
+            raise HTTPException(
+                status_code=400,
+                detail="Mill name cannot be empty"
+            )
+
+        duplicate = db.query(CommissiondarMill).filter(
+            CommissiondarMill.commissiondar_id == current_user.party_id,
+            CommissiondarMill.id != mill_id,
+            func.lower(CommissiondarMill.name) == name.lower()
+        ).first()
+
+        if duplicate:
+            raise HTTPException(
+                status_code=409,
+                detail="This mill name already exists"
+            )
+
+        mill.name = name
+
+    if data.is_active is not None:
+        mill.is_active = data.is_active
+
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(
+            status_code=409,
+            detail="Could not update mill because of a duplicate name"
+        )
+    except Exception:
+        db.rollback()
+        raise HTTPException(
+            status_code=500,
+            detail="Failed to update mill"
+        )
+
+    db.refresh(mill)
+
+    return {
+        "id": mill.id,
+        "name": mill.name,
+        "is_active": mill.is_active,
+        "message": "Mill updated successfully"
+    }
+
+
+@app.delete("/api/commissiondar/mills/{mill_id}")
+def deactivate_commissiondar_mill(
+    mill_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_commissiondar)
+):
+    mill = db.query(CommissiondarMill).filter(
+        CommissiondarMill.id == mill_id,
+        CommissiondarMill.commissiondar_id == current_user.party_id,
+        CommissiondarMill.business_id == current_user.business_id
+    ).first()
+
+    if not mill:
+        raise HTTPException(
+            status_code=404,
+            detail="Mill not found"
+        )
+
+    if not mill.is_active:
+        raise HTTPException(
+            status_code=400,
+            detail="Mill is already inactive"
+        )
+
+    mill.is_active = False
+
+    commit_transaction(
+        db,
+        "Failed to deactivate mill"
+    )
+
+    return {
+        "id": mill.id,
+        "name": mill.name,
+        "is_active": False,
+        "message": "Mill deactivated successfully"
+    }
 
 
 # ---------------------------------------------------------------
@@ -2177,3 +2921,256 @@ def update_farmer(farmer_id: int, data: FarmerUpdate, db: Session = Depends(get_
         farmer.village = data.village.strip()
     commit_transaction(db, "Failed to update farmer")
     return {"id": farmer.id, "name": farmer.name, "village": farmer.village, "associated_commissiondar_id": farmer.associated_commissiondar_id}
+
+# ---------------------------------------------------------------
+# Commissiondar: Manual Mill Commission Ledger
+# ---------------------------------------------------------------
+
+@app.post(
+    "/api/commissiondar/mills/{mill_id}/commissions",
+    status_code=201
+)
+def create_commissiondar_mill_commission(
+    mill_id: int,
+    data: CommissiondarMillCommissionCreate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_commissiondar)
+):
+    # Only the logged-in Commissiondar's active mill is allowed.
+    mill = db.query(CommissiondarMill).filter(
+        CommissiondarMill.id == mill_id,
+        CommissiondarMill.commissiondar_id == current_user.party_id,
+        CommissiondarMill.business_id == current_user.business_id,
+        CommissiondarMill.is_active == True
+    ).first()
+
+    if not mill:
+        raise HTTPException(status_code=404, detail="Active mill not found")
+
+    commission = CommissiondarMillCommission(
+        commissiondar_id=current_user.party_id,
+        mill_id=mill.id,
+        commission_amount=data.commission_amount,
+        earned_at=data.earned_at or date.today(),
+        note=data.note.strip() if data.note else None,
+        is_void=False
+    )
+
+    db.add(commission)
+    commit_transaction(db, "Failed to record commission")
+    db.refresh(commission)
+
+    return {
+        "id": commission.id,
+        "mill_id": mill.id,
+        "mill_name": mill.name,
+        "commission_amount": float(commission.commission_amount),
+        "earned_at": commission.earned_at,
+        "note": commission.note,
+        "received_amount": 0.0,
+        "pending_amount": float(commission.commission_amount),
+        "message": "Commission recorded successfully"
+    }
+
+
+@app.get("/api/commissiondar/mills/{mill_id}/commissions")
+def list_commissiondar_mill_commissions(
+    mill_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_commissiondar)
+):
+    mill = db.query(CommissiondarMill).filter(
+        CommissiondarMill.id == mill_id,
+        CommissiondarMill.commissiondar_id == current_user.party_id,
+        CommissiondarMill.business_id == current_user.business_id
+    ).first()
+
+    if not mill:
+        raise HTTPException(status_code=404, detail="Mill not found")
+
+    commissions = db.query(CommissiondarMillCommission).filter(
+        CommissiondarMillCommission.mill_id == mill.id,
+        CommissiondarMillCommission.commissiondar_id == current_user.party_id,
+        CommissiondarMillCommission.is_void == False
+    ).order_by(
+        CommissiondarMillCommission.earned_at.desc(),
+        CommissiondarMillCommission.id.desc()
+    ).all()
+
+    commission_ids = [item.id for item in commissions]
+
+    receipts = []
+    if commission_ids:
+        receipts = db.query(CommissiondarMillCommissionReceipt).filter(
+            CommissiondarMillCommissionReceipt.commission_id.in_(commission_ids),
+            CommissiondarMillCommissionReceipt.commissiondar_id == current_user.party_id,
+            CommissiondarMillCommissionReceipt.is_void == False
+        ).order_by(
+            CommissiondarMillCommissionReceipt.received_at.desc(),
+            CommissiondarMillCommissionReceipt.id.desc()
+        ).all()
+
+    receipts_by_commission = {}
+    for receipt in receipts:
+        receipts_by_commission.setdefault(receipt.commission_id, []).append(receipt)
+
+    result = []
+    total_earned = Decimal("0.00")
+    total_received = Decimal("0.00")
+
+    for commission in commissions:
+        commission_receipts = receipts_by_commission.get(commission.id, [])
+
+        received = sum(
+            (receipt.amount for receipt in commission_receipts),
+            Decimal("0.00")
+        )
+
+        earned = commission.commission_amount
+        pending = earned - received
+
+        total_earned += earned
+        total_received += received
+
+        result.append({
+            "id": commission.id,
+            "commission_amount": float(earned),
+            "earned_at": commission.earned_at,
+            "note": commission.note,
+            "received_amount": float(received),
+            "pending_amount": float(pending),
+            "receipts": [
+                {
+                    "id": receipt.id,
+                    "amount": float(receipt.amount),
+                    "received_at": receipt.received_at,
+                    "note": receipt.note
+                }
+                for receipt in commission_receipts
+            ]
+        })
+
+    return {
+        "mill_id": mill.id,
+        "mill_name": mill.name,
+        "total_earned": float(total_earned),
+        "total_received": float(total_received),
+        "total_pending": float(total_earned - total_received),
+        "commission_count": len(result),
+        "commissions": result
+    }
+
+
+@app.post(
+    "/api/commissiondar/commissions/{commission_id}/receipts",
+    status_code=201
+)
+def create_commissiondar_commission_receipt(
+    commission_id: int,
+    data: CommissiondarMillCommissionReceiptCreate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_commissiondar)
+):
+    # Lock the commission row while checking and recording a receipt.
+    # This prevents concurrent receipts from exceeding the pending amount.
+    commission = db.query(CommissiondarMillCommission).filter(
+    CommissiondarMillCommission.id == commission_id,
+    CommissiondarMillCommission.commissiondar_id == current_user.party_id,
+    CommissiondarMillCommission.is_void == False
+).with_for_update().first()
+
+    if not commission:
+        raise HTTPException(status_code=404, detail="Commission entry not found")
+
+    received = db.query(
+        func.coalesce(
+            func.sum(CommissiondarMillCommissionReceipt.amount),
+            0
+        )
+    ).filter(
+        CommissiondarMillCommissionReceipt.commission_id == commission.id,
+        CommissiondarMillCommissionReceipt.commissiondar_id == current_user.party_id,
+        CommissiondarMillCommissionReceipt.is_void == False
+    ).scalar()
+
+    received = received or Decimal("0.00")
+    pending = commission.commission_amount - received
+
+    if data.amount > pending:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "message": "Receipt amount exceeds pending commission",
+                "pending_amount": float(pending)
+            }
+        )
+
+    receipt = CommissiondarMillCommissionReceipt(
+        commissiondar_id=current_user.party_id,
+        commission_id=commission.id,
+        amount=data.amount,
+        received_at=data.received_at or date.today(),
+        note=data.note.strip() if data.note else None,
+        is_void=False
+    )
+
+    db.add(receipt)
+    commit_transaction(db, "Failed to record commission receipt")
+    db.refresh(receipt)
+
+    remaining = pending - receipt.amount
+
+    return {
+        "id": receipt.id,
+        "commission_id": commission.id,
+        "amount": float(receipt.amount),
+        "received_at": receipt.received_at,
+        "note": receipt.note,
+        "remaining_pending": float(remaining),
+        "message": "Commission receipt recorded successfully"
+    }
+
+
+@app.get("/api/commissiondar/commissions/{commission_id}/receipts")
+def list_commissiondar_commission_receipts(
+    commission_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_commissiondar)
+):
+    commission = db.query(CommissiondarMillCommission).filter(
+        CommissiondarMillCommission.id == commission_id,
+        CommissiondarMillCommission.commissiondar_id == current_user.party_id
+    ).first()
+
+    if not commission:
+        raise HTTPException(status_code=404, detail="Commission entry not found")
+
+    receipts = db.query(CommissiondarMillCommissionReceipt).filter(
+        CommissiondarMillCommissionReceipt.commission_id == commission.id,
+        CommissiondarMillCommissionReceipt.commissiondar_id == current_user.party_id,
+        CommissiondarMillCommissionReceipt.is_void == False
+    ).order_by(
+        CommissiondarMillCommissionReceipt.received_at.desc(),
+        CommissiondarMillCommissionReceipt.id.desc()
+    ).all()
+
+    total_received = sum(
+        (receipt.amount for receipt in receipts),
+        Decimal("0.00")
+    )
+
+    return {
+        "commission_id": commission.id,
+        "commission_amount": float(commission.commission_amount),
+        "total_received": float(total_received),
+        "pending_amount": float(commission.commission_amount - total_received),
+        "receipts": [
+            {
+                "id": receipt.id,
+                "amount": float(receipt.amount),
+                "received_at": receipt.received_at,
+                "note": receipt.note
+            }
+            for receipt in receipts
+        ]
+    }

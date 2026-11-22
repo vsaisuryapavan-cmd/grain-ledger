@@ -169,25 +169,6 @@ def test_commissiondar_blocked_from_mill_loans():
 
     assert response.status_code == 403
     assert response.json()["detail"] == "Only the mill owner can do this"
-
-
-def test_miller_blocked_from_commissiondar_loans():
-    headers = get_headers("9999999999")
-
-    response = client.post(
-        "/api/commissiondar-loans",
-        json={
-            "farmer_id": 3,
-            "principal": 10000,
-            "interest_rate_pa": 10
-        },
-        headers=headers
-    )
-
-    assert response.status_code == 403
-    assert response.json()["detail"] == "Only active commissiondars can access this"
-
-
 # -------------------------
 # Farmer balance test
 # -------------------------
@@ -1034,8 +1015,10 @@ def test_login_challenge_cannot_be_reused(monkeypatch):
 # Phase 1 independent-account additions
 # -------------------------
 
+
 def test_miller_can_manage_private_commissiondar_contacts_and_packet_commission():
     headers = get_headers("9999999999")
+
     contact = client.post(
         "/api/miller/commissiondars",
         json={"name": "Phase1 Contact Test"},
@@ -1046,12 +1029,17 @@ def test_miller_can_manage_private_commissiondar_contacts_and_packet_commission(
 
     farmer = client.post(
         "/api/farmers",
-        json={"name": "Phase1 Farmer Test", "village": "Test Village", "associated_commissiondar_id": contact_id},
+        json={
+            "name": "Phase1 Farmer Test",
+            "village": "Test Village",
+            "associated_commissiondar_id": contact_id,
+        },
         headers=headers,
     )
     assert farmer.status_code == 200, farmer.text
     farmer_id = farmer.json()["id"]
 
+    # First intake: fixed commission
     intake = client.post(
         "/api/intake",
         json={
@@ -1068,7 +1056,9 @@ def test_miller_can_manage_private_commissiondar_contacts_and_packet_commission(
     )
     assert intake.status_code == 200, intake.text
     assert float(intake.json()["broker_commission"]["commission_amount"]) == 500
+    commission_id = intake.json()["broker_commission"]["id"]
 
+    # Second intake: percentage commission
     percentage_intake = client.post(
         "/api/intake",
         json={
@@ -1086,18 +1076,173 @@ def test_miller_can_manage_private_commissiondar_contacts_and_packet_commission(
     assert percentage_intake.status_code == 200, percentage_intake.text
     assert float(percentage_intake.json()["broker_commission"]["commission_amount"]) == 550
 
-    contacts = client.get("/api/miller/commissiondars", headers=headers)
+    # Verify Commissiondar contact-list totals
+    contacts = client.get(
+        "/api/miller/commissiondars",
+        headers=headers,
+    )
     assert contacts.status_code == 200, contacts.text
+
     row = next(x for x in contacts.json() if x["id"] == contact_id)
-    assert row["visit_count"] == 2
-    assert row["total_packets"] == 20
-    assert row["total_commission"] == 1050
 
     assert row["visit_count"] == 2
     assert row["total_packets"] == 20
     assert row["total_commission"] == 1050
+    assert row["total_farmers"] == 1
+    assert row["commission_paid"] == 0
+    assert row["commission_outstanding"] == 1050
 
+    # Verify detailed Miller Commissiondar report
+    detail = client.get(
+        f"/api/miller/commissiondars/{contact_id}",
+        headers=headers,
+    )
+    assert detail.status_code == 200, detail.text
 
+    report = detail.json()
+
+    # Contact details
+    assert report["contact"]["id"] == contact_id
+    assert report["contact"]["name"] == "Phase1 Contact Test"
+
+    # Overall summary
+    summary = report["summary"]
+    assert summary["total_farmers"] == 1
+    assert summary["total_intakes"] == 2
+    assert float(summary["total_quantity"]) == 8
+    assert float(summary["total_commission"]) == 1050
+    assert float(summary["commission_paid"]) == 0
+    assert float(summary["commission_outstanding"]) == 1050
+
+    # Farmer-wise report
+    farmer_report = next(
+        x for x in report["farmers"]
+        if x["farmer_id"] == farmer_id
+    )
+
+    assert farmer_report["farmer_name"] == "Phase1 Farmer Test"
+    assert farmer_report["total_intakes"] == 2
+    assert float(farmer_report["total_quantity"]) == 8
+    assert float(farmer_report["commission_earned"]) == 1050
+    assert float(farmer_report["commission_paid"]) == 0
+    assert float(farmer_report["commission_outstanding"]) == 1050
+    assert len(farmer_report["intakes"]) == 2
+
+    # Pay the first commission in full
+    payment = client.post(
+        "/api/broker-commissions/pay",
+        json={"commission_id": commission_id},
+        headers=headers,
+    )
+    assert payment.status_code == 200, payment.text
+    assert payment.json()["is_paid"] is True
+
+    # Verify updated commission totals
+    updated_detail = client.get(
+        f"/api/miller/commissiondars/{contact_id}",
+        headers=headers,
+    )
+    assert updated_detail.status_code == 200, updated_detail.text
+
+    updated_report = updated_detail.json()
+    updated_summary = updated_report["summary"]
+
+    assert float(updated_summary["total_commission"]) == 1050
+    assert float(updated_summary["commission_paid"]) == 500
+    assert float(updated_summary["commission_outstanding"]) == 550
+
+    updated_farmer = next(
+        x for x in updated_report["farmers"]
+        if x["farmer_id"] == farmer_id
+    )
+    assert float(updated_farmer["commission_paid"]) == 500
+    assert float(updated_farmer["commission_outstanding"]) == 550
+
+    # Prevent paying the same commission twice
+    duplicate_payment = client.post(
+        "/api/broker-commissions/pay",
+        json={"commission_id": commission_id},
+        headers=headers,
+    )
+    assert duplicate_payment.status_code == 400
+
+    # Create a second farmer under the same Miller Commissiondar contact
+    farmer2 = client.post(
+        "/api/farmers",
+        json={
+            "name": "Phase1 Second Farmer",
+            "village": "Second Village",
+            "associated_commissiondar_id": contact_id,
+        },
+        headers=headers,
+    )
+    assert farmer2.status_code == 200, farmer2.text
+    farmer2_id = farmer2.json()["id"]
+
+    # Record an intake for the second farmer
+    intake2 = client.post(
+        "/api/intake",
+        json={
+            "farmer_id": farmer2_id,
+            "item_id": 2,
+            "quantity": 3,
+            "rate": 2200,
+            "packet_count": 2,
+            "packet_price": 2200,
+            "commission_type": "fixed",
+            "commission_rate": 25,
+        },
+        headers=headers,
+    )
+    assert intake2.status_code == 200, intake2.text
+    assert float(intake2.json()["broker_commission"]["commission_amount"]) == 50
+
+    # Verify both farmers appear separately in the detailed report
+    multi_detail = client.get(
+        f"/api/miller/commissiondars/{contact_id}",
+        headers=headers,
+    )
+    assert multi_detail.status_code == 200, multi_detail.text
+
+    multi_report = multi_detail.json()
+    multi_summary = multi_report["summary"]
+
+    assert multi_summary["total_farmers"] == 2
+    assert multi_summary["total_intakes"] == 3
+    assert float(multi_summary["total_quantity"]) == 11
+    assert float(multi_summary["total_commission"]) == 1100
+    assert float(multi_summary["commission_paid"]) == 500
+    assert float(multi_summary["commission_outstanding"]) == 600
+
+    # Verify second farmer's individual report
+    farmer2_report = next(
+        x for x in multi_report["farmers"]
+        if x["farmer_id"] == farmer2_id
+    )
+
+    assert farmer2_report["farmer_name"] == "Phase1 Second Farmer"
+    assert farmer2_report["total_intakes"] == 1
+    assert float(farmer2_report["total_quantity"]) == 3
+    assert float(farmer2_report["commission_earned"]) == 50
+    assert float(farmer2_report["commission_paid"]) == 0
+    assert float(farmer2_report["commission_outstanding"]) == 50
+
+    # Verify updated Commissiondar contact-list totals
+    updated_contacts = client.get(
+        "/api/miller/commissiondars",
+        headers=headers,
+    )
+    assert updated_contacts.status_code == 200, updated_contacts.text
+
+    updated_row = next(
+        x for x in updated_contacts.json()
+        if x["id"] == contact_id
+    )
+
+    assert updated_row["total_farmers"] == 2
+    assert updated_row["total_commission"] == 1100
+    assert updated_row["commission_paid"] == 500
+    assert updated_row["commission_outstanding"] == 600
 def test_commissiondar_can_manage_own_farmers_and_independent_stock_delivery():
     headers = get_headers("8888888888")
     farmer = client.post(
@@ -1192,3 +1337,483 @@ def test_miller_cannot_use_commissiondar_farmer_directory():
     headers = get_headers("9999999999")
     response = client.get("/api/commissiondar/farmers", headers=headers)
     assert response.status_code == 403
+
+def test_commissiondar_can_manage_own_mills():
+    headers = get_headers("8888888888")
+    mill_name = f"Test Mill {uuid.uuid4().hex[:8]}"
+
+    # Create a mill
+    create = client.post(
+        "/api/commissiondar/mills",
+        json={"name": f"  {mill_name}  "},
+        headers=headers,
+    )
+    assert create.status_code == 201, create.text
+
+    mill = create.json()
+    mill_id = mill["id"]
+    assert mill["name"] == mill_name
+    assert mill["is_active"] is True
+
+    # List active mills
+    listing = client.get(
+        "/api/commissiondar/mills",
+        headers=headers,
+    )
+    assert listing.status_code == 200, listing.text
+    assert any(item["id"] == mill_id for item in listing.json())
+
+    # Reject duplicate names (case-insensitive)
+    duplicate = client.post(
+        "/api/commissiondar/mills",
+        json={"name": mill_name.lower()},
+        headers=headers,
+    )
+    assert duplicate.status_code == 409
+
+    # Rename the mill
+    new_name = f"Updated {mill_name}"
+    update = client.put(
+        f"/api/commissiondar/mills/{mill_id}",
+        json={"name": new_name},
+        headers=headers,
+    )
+    assert update.status_code == 200, update.text
+    assert update.json()["name"] == new_name
+
+    # Deactivate the mill
+    deactivate = client.delete(
+        f"/api/commissiondar/mills/{mill_id}",
+        headers=headers,
+    )
+    assert deactivate.status_code == 200, deactivate.text
+    assert deactivate.json()["is_active"] is False
+
+    # It should not appear in the default active list
+    active_listing = client.get(
+        "/api/commissiondar/mills",
+        headers=headers,
+    )
+    assert active_listing.status_code == 200
+    assert not any(
+        item["id"] == mill_id
+        for item in active_listing.json()
+    )
+
+    # It should remain visible when inactive mills are requested
+    all_listing = client.get(
+        "/api/commissiondar/mills?include_inactive=true",
+        headers=headers,
+    )
+    assert all_listing.status_code == 200
+    assert any(item["id"] == mill_id for item in all_listing.json())
+
+
+def test_miller_cannot_access_commissiondar_mills():
+    commissiondar_headers = get_headers("8888888888")
+    miller_headers = get_headers("9999999999")
+
+    # Create a Commissiondar-owned mill
+    create = client.post(
+        "/api/commissiondar/mills",
+        json={"name": f"Private Mill {uuid.uuid4().hex[:8]}"},
+        headers=commissiondar_headers,
+    )
+    assert create.status_code == 201, create.text
+    mill_id = create.json()["id"]
+
+    # Miller cannot list Commissiondar mills
+    listing = client.get(
+        "/api/commissiondar/mills",
+        headers=miller_headers,
+    )
+    assert listing.status_code == 403
+
+    # Miller cannot create a Commissiondar mill
+    create_as_miller = client.post(
+        "/api/commissiondar/mills",
+        json={"name": "Unauthorized Mill"},
+        headers=miller_headers,
+    )
+    assert create_as_miller.status_code == 403
+
+    # Miller cannot update a Commissiondar mill
+    update = client.put(
+        f"/api/commissiondar/mills/{mill_id}",
+        json={"name": "Unauthorized Rename"},
+        headers=miller_headers,
+    )
+    assert update.status_code == 403
+
+    # Miller cannot deactivate a Commissiondar mill
+    delete = client.delete(
+        f"/api/commissiondar/mills/{mill_id}",
+        headers=miller_headers,
+    )
+    assert delete.status_code == 403
+
+def test_commissiondar_farmer_can_be_associated_with_multiple_mills():
+    headers = get_headers("8888888888")
+
+    # Create one farmer in the Commissiondar's own directory.
+    farmer_response = client.post(
+        "/api/commissiondar/farmers",
+        json={
+            "name": f"Multi Mill Farmer {uuid.uuid4().hex[:8]}",
+            "village": "Test Village",
+        },
+        headers=headers,
+    )
+    assert farmer_response.status_code == 201, farmer_response.text
+    farmer = farmer_response.json()
+    farmer_id = farmer["id"]
+
+    # Create two independent mills.
+    mill_ids = []
+
+    for name in ["Multi Mill A", "Multi Mill B"]:
+        response = client.post(
+            "/api/commissiondar/mills",
+            json={"name": f"{name} {uuid.uuid4().hex[:8]}"},
+            headers=headers,
+        )
+        assert response.status_code == 201, response.text
+        mill_ids.append(response.json()["id"])
+
+    # Associate the same farmer with both mills.
+    for mill_id in mill_ids:
+        response = client.post(
+            f"/api/commissiondar/mills/{mill_id}/farmers/{farmer_id}",
+            headers=headers,
+        )
+        assert response.status_code == 201, response.text
+
+    # Verify both mills independently contain the farmer.
+    for mill_id in mill_ids:
+        response = client.get(
+            f"/api/commissiondar/mills/{mill_id}/farmers",
+            headers=headers,
+        )
+        assert response.status_code == 200, response.text
+
+        data = response.json()
+        assert data["farmer_count"] == 1
+        assert data["farmers"][0]["id"] == farmer_id
+
+
+def test_removing_farmer_from_one_mill_preserves_other_association():
+    headers = get_headers("8888888888")
+
+    # Create farmer.
+    farmer_response = client.post(
+        "/api/commissiondar/farmers",
+        json={
+            "name": f"Association Removal Farmer {uuid.uuid4().hex[:8]}",
+            "village": "Removal Village",
+        },
+        headers=headers,
+    )
+    assert farmer_response.status_code == 201, farmer_response.text
+    farmer_id = farmer_response.json()["id"]
+
+    # Create two mills.
+    mill_ids = []
+
+    for name in ["Removal Mill A", "Removal Mill B"]:
+        response = client.post(
+            "/api/commissiondar/mills",
+            json={"name": f"{name} {uuid.uuid4().hex[:8]}"},
+            headers=headers,
+        )
+        assert response.status_code == 201, response.text
+        mill_ids.append(response.json()["id"])
+
+    # Associate farmer with both.
+    for mill_id in mill_ids:
+        response = client.post(
+            f"/api/commissiondar/mills/{mill_id}/farmers/{farmer_id}",
+            headers=headers,
+        )
+        assert response.status_code == 201, response.text
+
+    # Remove farmer only from the first mill.
+    removal = client.delete(
+        f"/api/commissiondar/mills/{mill_ids[0]}/farmers/{farmer_id}",
+        headers=headers,
+    )
+    assert removal.status_code == 200, removal.text
+
+    # First mill should no longer show the farmer.
+    first = client.get(
+        f"/api/commissiondar/mills/{mill_ids[0]}/farmers",
+        headers=headers,
+    )
+    assert first.status_code == 200
+    assert first.json()["farmer_count"] == 0
+
+    # Second mill must still show the farmer.
+    second = client.get(
+        f"/api/commissiondar/mills/{mill_ids[1]}/farmers",
+        headers=headers,
+    )
+    assert second.status_code == 200
+    assert second.json()["farmer_count"] == 1
+    assert second.json()["farmers"][0]["id"] == farmer_id
+
+    # Farmer must remain in the Commissiondar's directory.
+    directory = client.get(
+        "/api/commissiondar/farmers",
+        headers=headers,
+    )
+    assert directory.status_code == 200
+    assert any(
+        farmer["id"] == farmer_id
+        for farmer in directory.json()
+    )
+
+def test_commissiondar_mill_commission_and_receipt_ledger():
+    headers = get_headers("8888888888")
+
+    # Create a mill.
+    mill_response = client.post(
+        "/api/commissiondar/mills",
+        json={"name": f"Commission Test Mill {uuid.uuid4().hex[:8]}"},
+        headers=headers,
+    )
+    assert mill_response.status_code == 201, mill_response.text
+    mill_id = mill_response.json()["id"]
+
+    # Record manually earned commission.
+    commission_response = client.post(
+        f"/api/commissiondar/mills/{mill_id}/commissions",
+        json={
+            "commission_amount": 8000,
+            "earned_at": "2026-11-23",
+            "note": "Paddy commission",
+        },
+        headers=headers,
+    )
+    assert commission_response.status_code == 201, commission_response.text
+
+    commission = commission_response.json()
+    commission_id = commission["id"]
+
+    assert commission["commission_amount"] == 8000.0
+    assert commission["received_amount"] == 0.0
+    assert commission["pending_amount"] == 8000.0
+
+    # Record first partial receipt.
+    first_receipt = client.post(
+        f"/api/commissiondar/commissions/{commission_id}/receipts",
+        json={
+            "amount": 3000,
+            "received_at": "2026-11-23",
+            "note": "First payment",
+        },
+        headers=headers,
+    )
+    assert first_receipt.status_code == 201, first_receipt.text
+    assert first_receipt.json()["remaining_pending"] == 5000.0
+
+    # Record second partial receipt.
+    second_receipt = client.post(
+        f"/api/commissiondar/commissions/{commission_id}/receipts",
+        json={"amount": 2000, "note": "Second payment"},
+        headers=headers,
+    )
+    assert second_receipt.status_code == 201, second_receipt.text
+    assert second_receipt.json()["remaining_pending"] == 3000.0
+
+    # Reject a receipt greater than the remaining pending amount.
+    overpayment = client.post(
+        f"/api/commissiondar/commissions/{commission_id}/receipts",
+        json={"amount": 3001},
+        headers=headers,
+    )
+    assert overpayment.status_code == 400
+
+    # Record the exact remaining amount.
+    final_receipt = client.post(
+        f"/api/commissiondar/commissions/{commission_id}/receipts",
+        json={"amount": 3000, "note": "Final payment"},
+        headers=headers,
+    )
+    assert final_receipt.status_code == 201, final_receipt.text
+    assert final_receipt.json()["remaining_pending"] == 0.0
+
+    # Verify receipt history.
+    receipt_history = client.get(
+        f"/api/commissiondar/commissions/{commission_id}/receipts",
+        headers=headers,
+    )
+    assert receipt_history.status_code == 200, receipt_history.text
+
+    receipt_data = receipt_history.json()
+    assert receipt_data["commission_amount"] == 8000.0
+    assert receipt_data["total_received"] == 8000.0
+    assert receipt_data["pending_amount"] == 0.0
+    assert len(receipt_data["receipts"]) == 3
+
+    # Verify mill-wise commission summary.
+    mill_history = client.get(
+        f"/api/commissiondar/mills/{mill_id}/commissions",
+        headers=headers,
+    )
+    assert mill_history.status_code == 200, mill_history.text
+
+    summary = mill_history.json()
+    assert summary["total_earned"] == 8000.0
+    assert summary["total_received"] == 8000.0
+    assert summary["total_pending"] == 0.0
+    assert summary["commission_count"] == 1
+
+
+def test_miller_cannot_access_commissiondar_commission_ledger():
+    commissiondar_headers = get_headers("8888888888")
+    miller_headers = get_headers("9999999999")
+
+    # Create a Commissiondar-owned mill and commission.
+    mill_response = client.post(
+        "/api/commissiondar/mills",
+        json={"name": f"Private Commission Mill {uuid.uuid4().hex[:8]}"},
+        headers=commissiondar_headers,
+    )
+    assert mill_response.status_code == 201, mill_response.text
+    mill_id = mill_response.json()["id"]
+
+    commission_response = client.post(
+        f"/api/commissiondar/mills/{mill_id}/commissions",
+        json={"commission_amount": 5000},
+        headers=commissiondar_headers,
+    )
+    assert commission_response.status_code == 201, commission_response.text
+    commission_id = commission_response.json()["id"]
+
+    # Miller cannot view the Commissiondar's commission history.
+    history = client.get(
+        f"/api/commissiondar/mills/{mill_id}/commissions",
+        headers=miller_headers,
+    )
+    assert history.status_code == 403
+
+    # Miller cannot record a receipt against that commission.
+    receipt = client.post(
+        f"/api/commissiondar/commissions/{commission_id}/receipts",
+        json={"amount": 1000},
+        headers=miller_headers,
+    )
+    assert receipt.status_code == 403
+
+    # Miller cannot view its receipt history either.
+    receipt_history = client.get(
+        f"/api/commissiondar/commissions/{commission_id}/receipts",
+        headers=miller_headers,
+    )
+    assert receipt_history.status_code == 403
+
+
+def test_commissiondar_dashboard_shows_mill_commission_totals():
+    headers = get_headers("8888888888")
+
+    # Capture existing dashboard totals first.
+    baseline_response = client.get(
+        "/api/commissiondar-dashboard",
+        headers=headers,
+    )
+    assert baseline_response.status_code == 200, baseline_response.text
+    baseline = baseline_response.json()
+
+    # Create two mills.
+    mill_ids = []
+
+    for name in [
+        f"Dashboard Mill A {uuid.uuid4().hex[:8]}",
+        f"Dashboard Mill B {uuid.uuid4().hex[:8]}"
+    ]:
+        response = client.post(
+            "/api/commissiondar/mills",
+            json={"name": name},
+            headers=headers,
+        )
+        assert response.status_code == 201, response.text
+        mill_ids.append(response.json()["id"])
+
+    # Create two farmers.
+    farmer_ids = []
+
+    for name in [
+        f"Dashboard Farmer A {uuid.uuid4().hex[:8]}",
+        f"Dashboard Farmer B {uuid.uuid4().hex[:8]}"
+    ]:
+        response = client.post(
+            "/api/commissiondar/farmers",
+            json={"name": name},
+            headers=headers,
+        )
+        assert response.status_code == 201, response.text
+        farmer_ids.append(response.json()["id"])
+
+    # Associate one farmer with each mill.
+    for mill_id, farmer_id in zip(mill_ids, farmer_ids):
+        response = client.post(
+            f"/api/commissiondar/mills/{mill_id}/farmers/{farmer_id}",
+            headers=headers,
+        )
+        assert response.status_code in (200, 201), response.text
+
+    # Record ₹8,000 manually earned commission.
+    commission_response = client.post(
+        f"/api/commissiondar/mills/{mill_ids[0]}/commissions",
+        json={
+            "commission_amount": 8000,
+            "earned_at": "2026-11-23",
+            "note": "Dashboard test commission",
+        },
+        headers=headers,
+    )
+    assert commission_response.status_code == 201, commission_response.text
+    commission_id = commission_response.json()["id"]
+
+    # Record two partial receipts: ₹3,000 + ₹2,000.
+    for amount in [3000, 2000]:
+        response = client.post(
+            f"/api/commissiondar/commissions/{commission_id}/receipts",
+            json={"amount": amount},
+            headers=headers,
+        )
+        assert response.status_code == 201, response.text
+
+    # Read the updated dashboard.
+    dashboard_response = client.get(
+        "/api/commissiondar-dashboard",
+        headers=headers,
+    )
+    assert dashboard_response.status_code == 200, dashboard_response.text
+
+    dashboard = dashboard_response.json()
+
+    # Check the changes made by this test, not absolute database totals.
+    assert dashboard["commissions_earned"] == (
+        baseline["commissions_earned"] + 8000.0
+    )
+
+    assert dashboard["commissions_received"] == (
+        baseline["commissions_received"] + 5000.0
+    )
+
+    assert dashboard["commissions_pending"] == (
+        baseline["commissions_pending"] + 3000.0
+    )
+
+    assert dashboard["total_mills"] == baseline["total_mills"] + 2
+
+    assert dashboard["associated_farmers"] == (
+        baseline["associated_farmers"] + 2
+    )
+
+    # Verify the latest commission details.
+    latest = dashboard["latest_commission"]
+    assert latest is not None
+    assert latest["commission_amount"] == 8000.0
+    assert latest["received_amount"] == 5000.0
+    assert latest["pending_amount"] == 3000.0

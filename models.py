@@ -470,6 +470,163 @@ class LoginLog(Base):
         server_default=func.now()
     )
 
+class CommissiondarMill(Base):
+    __tablename__ = "commissiondar_mills"
+
+    id = Column(BigInteger, primary_key=True)
+
+    commissiondar_id = Column(
+        BigInteger,
+        ForeignKey("parties.id"),
+        nullable=False
+    )
+    business_id = Column(
+        BigInteger,
+        ForeignKey("businesses.id"),
+        nullable=False
+    )
+
+    name = Column(String(200), nullable=False)
+    is_active = Column(Boolean, nullable=False, default=True)
+
+    created_at = Column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        nullable=False
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            "commissiondar_id",
+            "name",
+            name="uq_commissiondar_mill_name"
+        ),
+        CheckConstraint(
+            "LENGTH(TRIM(name)) > 0",
+            name="commissiondar_mill_name_not_empty"
+        ),
+    )
+
+
+class CommissiondarMillFarmer(Base):
+    __tablename__ = "commissiondar_mill_farmers"
+
+    id = Column(BigInteger, primary_key=True)
+
+    commissiondar_id = Column(
+        BigInteger,
+        ForeignKey("parties.id"),
+        nullable=False
+    )
+    mill_id = Column(
+        BigInteger,
+        ForeignKey("commissiondar_mills.id"),
+        nullable=False
+    )
+    farmer_id = Column(
+        BigInteger,
+        ForeignKey("parties.id"),
+        nullable=False
+    )
+
+    is_active = Column(Boolean, nullable=False, default=True)
+
+    created_at = Column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        nullable=False
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            "mill_id",
+            "farmer_id",
+            name="uq_commissiondar_mill_farmer"
+        ),
+    )
+
+
+class CommissiondarMillCommission(Base):
+    __tablename__ = "commissiondar_mill_commissions"
+
+    id = Column(BigInteger, primary_key=True)
+
+    commissiondar_id = Column(
+        BigInteger,
+        ForeignKey("parties.id"),
+        nullable=False
+    )
+    mill_id = Column(
+        BigInteger,
+        ForeignKey("commissiondar_mills.id"),
+        nullable=False
+    )
+
+    commission_amount = Column(Numeric(14, 2), nullable=False)
+
+    earned_at = Column(
+        Date,
+        server_default=func.now(),
+        nullable=False
+    )
+    note = Column(String)
+
+    is_void = Column(Boolean, nullable=False, default=False)
+
+    created_at = Column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        nullable=False
+    )
+
+    __table_args__ = (
+        CheckConstraint(
+            "commission_amount > 0",
+            name="commissiondar_mill_commission_positive"
+        ),
+    )
+
+
+class CommissiondarMillCommissionReceipt(Base):
+    __tablename__ = "commissiondar_mill_commission_receipts"
+
+    id = Column(BigInteger, primary_key=True)
+
+    commissiondar_id = Column(
+        BigInteger,
+        ForeignKey("parties.id"),
+        nullable=False
+    )
+    commission_id = Column(
+        BigInteger,
+        ForeignKey("commissiondar_mill_commissions.id"),
+        nullable=False
+    )
+
+    amount = Column(Numeric(14, 2), nullable=False)
+
+    received_at = Column(
+        Date,
+        server_default=func.now(),
+        nullable=False
+    )
+    note = Column(String)
+
+    is_void = Column(Boolean, nullable=False, default=False)
+
+    created_at = Column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        nullable=False
+    )
+
+    __table_args__ = (
+        CheckConstraint(
+            "amount > 0",
+            name="commissiondar_mill_receipt_positive"
+        ),
+    )
+
 
 class IssueReport(Base):
     __tablename__ = "issue_reports"
