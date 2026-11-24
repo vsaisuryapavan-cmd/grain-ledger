@@ -118,7 +118,16 @@ class CommissiondarMillCommissionReceiptCreate(BaseModel):
 class GrainTypeCreate(BaseModel):
     name: str = Field(min_length=1, max_length=120)
     unit: str = Field(default="quintal", min_length=1, max_length=30)
+class ItemCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=200)
+    category: str | None = Field(default=None, max_length=100)
+    unit: str = Field(min_length=1, max_length=50)
 
+
+class ItemUpdate(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=200)
+    category: str | None = Field(default=None, max_length=100)
+    unit: str | None = Field(default=None, min_length=1, max_length=50)
 
 class IntakeCreate(BaseModel):
     farmer_id: int
@@ -2958,6 +2967,11 @@ def deactivate_commissiondar_mill(
 # Items
 # ---------------------------------------------------------------
 
+# ---------------------------------------------------------------
+# ---------------------------------------------------------------
+# Miller Grain Items
+# ---------------------------------------------------------------
+
 @app.get("/api/items")
 def list_items(
     db: Session = Depends(get_db),
@@ -2980,6 +2994,165 @@ def list_items(
             }
             for item in items
         ]
+    }
+
+
+@app.post("/api/items", status_code=201)
+def create_item(
+    data: ItemCreate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_owner)
+):
+    name = data.name.strip()
+    unit = data.unit.strip()
+    category = data.category.strip() if data.category else None
+
+    if not name or not unit:
+        raise HTTPException(
+            status_code=400,
+            detail="Grain variety name and unit cannot be empty"
+        )
+
+    existing_item = db.query(Item).filter(
+        Item.business_id == current_user.business_id,
+        func.lower(Item.name) == name.lower()
+    ).first()
+
+    if existing_item:
+        raise HTTPException(
+            status_code=409,
+            detail="This grain variety already exists"
+        )
+
+    item = Item(
+        business_id=current_user.business_id,
+        name=name,
+        category=category,
+        unit=unit,
+        is_active=True
+    )
+
+    db.add(item)
+
+    try:
+        db.commit()
+        db.refresh(item)
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(
+            status_code=409,
+            detail="This grain variety already exists"
+        )
+
+    return {
+        "message": "Grain variety created successfully",
+        "item": {
+            "id": item.id,
+            "name": item.name,
+            "category": item.category,
+            "unit": item.unit
+        }
+    }
+
+
+@app.put("/api/items/{item_id}")
+def update_item(
+    item_id: int,
+    data: ItemUpdate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_owner)
+):
+    item = get_active_item(
+        db,
+        item_id,
+        current_user.business_id
+    )
+
+    updates = data.model_dump(exclude_unset=True)
+
+    if not updates:
+        raise HTTPException(
+            status_code=400,
+            detail="No fields provided for update"
+        )
+
+    if "name" in updates and updates["name"] is not None:
+        updates["name"] = updates["name"].strip()
+
+        if not updates["name"]:
+            raise HTTPException(
+                status_code=400,
+                detail="Grain variety name cannot be empty"
+            )
+
+        existing_item = db.query(Item).filter(
+            Item.business_id == current_user.business_id,
+            func.lower(Item.name) == updates["name"].lower(),
+            Item.id != item_id
+        ).first()
+
+        if existing_item:
+            raise HTTPException(
+                status_code=409,
+                detail="This grain variety already exists"
+            )
+
+    if "unit" in updates and updates["unit"] is not None:
+        updates["unit"] = updates["unit"].strip()
+
+        if not updates["unit"]:
+            raise HTTPException(
+                status_code=400,
+                detail="Unit cannot be empty"
+            )
+
+    if "category" in updates and updates["category"] is not None:
+        updates["category"] = updates["category"].strip() or None
+
+    for field, value in updates.items():
+        setattr(item, field, value)
+
+    try:
+        db.commit()
+        db.refresh(item)
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(
+            status_code=409,
+            detail="This grain variety already exists"
+        )
+
+    return {
+        "message": "Grain variety updated successfully",
+        "item": {
+            "id": item.id,
+            "name": item.name,
+            "category": item.category,
+            "unit": item.unit
+        }
+    }
+
+
+@app.patch("/api/items/{item_id}/deactivate")
+def deactivate_item(
+    item_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_owner)
+):
+    item = get_active_item(
+        db,
+        item_id,
+        current_user.business_id
+    )
+
+    item.is_active = False
+    db.commit()
+
+    return {
+        "message": "Grain variety deactivated successfully",
+        "item_id": item.id,
+        "name": item.name,
+        "is_active": False
     }
 
 

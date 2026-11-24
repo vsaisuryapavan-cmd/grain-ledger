@@ -1694,3 +1694,219 @@ def test_commissiondar_dashboard_shows_mill_commission_totals():
     assert latest["commission_amount"] == 8000.0
     assert latest["received_amount"] == 5000.0
     assert latest["pending_amount"] == 3000.0
+
+# ---------------------------------------------------------
+# Miller Custom Grain Variety Tests
+# ---------------------------------------------------------
+
+def test_miller_can_create_and_list_custom_grain():
+    headers = get_headers("9999999999")
+    grain_name = f"Custom Paddy {uuid.uuid4().hex[:8]}"
+
+    create_response = client.post(
+        "/api/items",
+        json={
+            "name": grain_name,
+            "category": "Paddy",
+            "unit": "quintal"
+        },
+        headers=headers
+    )
+
+    assert create_response.status_code == 201, create_response.text
+
+    created_item = create_response.json()["item"]
+
+    assert created_item["name"] == grain_name
+    assert created_item["category"] == "Paddy"
+    assert created_item["unit"] == "quintal"
+
+    list_response = client.get(
+        "/api/items",
+        headers=headers
+    )
+
+    assert list_response.status_code == 200, list_response.text
+
+    items = list_response.json()["items"]
+
+    assert any(item["id"] == created_item["id"] for item in items)
+
+
+def test_miller_cannot_create_duplicate_grain_name():
+    headers = get_headers("9999999999")
+    grain_name = f"Duplicate Paddy {uuid.uuid4().hex[:8]}"
+
+    first_response = client.post(
+        "/api/items",
+        json={
+            "name": grain_name,
+            "unit": "quintal"
+        },
+        headers=headers
+    )
+
+    assert first_response.status_code == 201, first_response.text
+
+    duplicate_response = client.post(
+        "/api/items",
+        json={
+            "name": grain_name.upper(),
+            "unit": "quintal"
+        },
+        headers=headers
+    )
+
+    assert duplicate_response.status_code == 409
+
+
+def test_miller_can_update_custom_grain():
+    headers = get_headers("9999999999")
+    grain_name = f"Update Paddy {uuid.uuid4().hex[:8]}"
+
+    create_response = client.post(
+        "/api/items",
+        json={
+            "name": grain_name,
+            "category": "Paddy",
+            "unit": "quintal"
+        },
+        headers=headers
+    )
+
+    assert create_response.status_code == 201, create_response.text
+
+    item_id = create_response.json()["item"]["id"]
+
+    updated_name = f"Updated Paddy {uuid.uuid4().hex[:8]}"
+
+    update_response = client.put(
+        f"/api/items/{item_id}",
+        json={
+            "name": updated_name,
+            "category": "Premium Paddy",
+            "unit": "kg"
+        },
+        headers=headers
+    )
+
+    assert update_response.status_code == 200, update_response.text
+
+    updated_item = update_response.json()["item"]
+
+    assert updated_item["id"] == item_id
+    assert updated_item["name"] == updated_name
+    assert updated_item["category"] == "Premium Paddy"
+    assert updated_item["unit"] == "kg"
+
+
+def test_miller_can_deactivate_custom_grain():
+    headers = get_headers("9999999999")
+    grain_name = f"Deactivate Paddy {uuid.uuid4().hex[:8]}"
+
+    create_response = client.post(
+        "/api/items",
+        json={
+            "name": grain_name,
+            "unit": "quintal"
+        },
+        headers=headers
+    )
+
+    assert create_response.status_code == 201, create_response.text
+
+    item_id = create_response.json()["item"]["id"]
+
+    deactivate_response = client.patch(
+        f"/api/items/{item_id}/deactivate",
+        headers=headers
+    )
+
+    assert deactivate_response.status_code == 200, deactivate_response.text
+
+    assert deactivate_response.json()["is_active"] is False
+
+    list_response = client.get(
+        "/api/items",
+        headers=headers
+    )
+
+    assert list_response.status_code == 200
+
+    assert all(
+        item["id"] != item_id
+        for item in list_response.json()["items"]
+    )
+
+
+def test_inactive_grain_cannot_be_used_for_intake_or_export():
+    headers = get_headers("9999999999")
+    grain_name = f"Inactive Paddy {uuid.uuid4().hex[:8]}"
+
+    create_response = client.post(
+        "/api/items",
+        json={
+            "name": grain_name,
+            "unit": "quintal"
+        },
+        headers=headers
+    )
+
+    assert create_response.status_code == 201, create_response.text
+
+    item_id = create_response.json()["item"]["id"]
+
+    deactivate_response = client.patch(
+        f"/api/items/{item_id}/deactivate",
+        headers=headers
+    )
+
+    assert deactivate_response.status_code == 200, deactivate_response.text
+
+    intake_response = client.post(
+        "/api/intake",
+        json={
+            "farmer_id": 3,
+            "item_id": item_id,
+            "quantity": 5,
+            "rate": 2000
+        },
+        headers=headers
+    )
+
+    assert intake_response.status_code == 404
+
+    export_response = client.post(
+        "/api/exports",
+        json={
+            "buyer_id": 4,
+            "item_id": item_id,
+            "quantity": 2,
+            "rate": 3000
+        },
+        headers=headers
+    )
+
+    assert export_response.status_code == 404
+
+
+def test_commissiondar_cannot_access_miller_grain_management():
+    headers = get_headers("8888888888")
+
+    list_response = client.get(
+        "/api/items",
+        headers=headers
+    )
+
+    assert list_response.status_code == 403
+
+    create_response = client.post(
+        "/api/items",
+        json={
+            "name": "Commissiondar Restricted Grain",
+            "unit": "quintal"
+        },
+        headers=headers
+    )
+
+    assert create_response.status_code == 403
