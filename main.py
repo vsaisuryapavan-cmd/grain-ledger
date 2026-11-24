@@ -3154,7 +3154,158 @@ def deactivate_item(
         "name": item.name,
         "is_active": False
     }
+# ---------------------------------------------------------------
+# Miller Inventory
+# ---------------------------------------------------------------
 
+@app.get("/api/inventory")
+def get_miller_inventory(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_owner)
+):
+    # Get every grain variety owned by this Miller.
+    # Inactive varieties remain visible for historical records.
+    items = db.query(Item).filter(
+        Item.business_id == current_user.business_id
+    ).order_by(
+        Item.name.asc()
+    ).all()
+
+    # Aggregate only this Miller's non-void stock movements.
+    movement_rows = db.query(
+        StockMovement.item_id,
+        StockMovement.movement_type,
+        func.sum(StockMovement.quantity)
+    ).filter(
+        StockMovement.business_id == current_user.business_id,
+        StockMovement.is_void == False
+    ).group_by(
+        StockMovement.item_id,
+        StockMovement.movement_type
+    ).all()
+
+    # Prepare totals for every item, including items with no movements.
+    totals = {
+        item.id: {
+            "received_quantity": 0.0,
+            "dispatched_quantity": 0.0,
+            "available_quantity": 0.0
+        }
+        for item in items
+    }
+
+    for item_id, movement_type, quantity in movement_rows:
+        if item_id not in totals:
+            continue
+
+        quantity = float(quantity or 0)
+
+        # Available stock includes the signed quantity of every
+        # non-void movement type.
+        totals[item_id]["available_quantity"] += quantity
+
+        if movement_type == "purchase":
+            totals[item_id]["received_quantity"] += quantity
+
+        elif movement_type == "sale":
+            totals[item_id]["dispatched_quantity"] += abs(quantity)
+
+    return {
+        "inventory": [
+            {
+                "item_id": item.id,
+                "name": item.name,
+                "category": item.category,
+                "unit": item.unit,
+                "is_active": item.is_active,
+                "received_quantity": totals[item.id]["received_quantity"],
+                "dispatched_quantity": totals[item.id]["dispatched_quantity"],
+                "available_quantity": totals[item.id]["available_quantity"]
+            }
+            for item in items
+        ]
+    }
+
+
+@app.get("/api/inventory/{item_id}/movements")
+def get_miller_inventory_movements(
+    item_id: int,
+    limit: int = 100,
+    offset: int = 0,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_owner)
+):
+    if limit < 1 or limit > 500:
+        raise HTTPException(
+            status_code=400,
+            detail="Limit must be between 1 and 500"
+        )
+
+    if offset < 0:
+        raise HTTPException(
+            status_code=400,
+            detail="Offset cannot be negative"
+        )
+
+    # Verify that this grain variety belongs to the logged-in Miller.
+    # Do not require is_active: inactive varieties still have history.
+    item = db.query(Item).filter(
+        Item.id == item_id,
+        Item.business_id == current_user.business_id
+    ).first()
+
+    if not item:
+        raise HTTPException(
+            status_code=404,
+            detail="Grain variety not found"
+        )
+
+    movement_query = db.query(StockMovement).filter(
+        StockMovement.business_id == current_user.business_id,
+        StockMovement.item_id == item_id
+    )
+
+    total_count = movement_query.count()
+
+    movements = movement_query.order_by(
+        StockMovement.moved_at.desc(),
+        StockMovement.id.desc()
+    ).offset(
+        offset
+    ).limit(
+        limit
+    ).all()
+
+    return {
+        "item": {
+            "item_id": item.id,
+            "name": item.name,
+            "category": item.category,
+            "unit": item.unit,
+            "is_active": item.is_active
+        },
+        "total": total_count,
+        "limit": limit,
+        "offset": offset,
+        "movements": [
+            {
+                "id": movement.id,
+                "movement_type": movement.movement_type,
+                "quantity": float(movement.quantity),
+                "rate": (
+                    float(movement.rate)
+                    if movement.rate is not None
+                    else None
+                ),
+                "party_id": movement.party_id,
+                "broker_id": movement.broker_id,
+                "moved_at": movement.moved_at,
+                "note": movement.note,
+                "is_void": movement.is_void
+            }
+            for movement in movements
+        ]
+    }
 
 # ---------------------------------------------------------------
 # Farmers

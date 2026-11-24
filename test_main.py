@@ -1910,3 +1910,236 @@ def test_commissiondar_cannot_access_miller_grain_management():
     )
 
     assert create_response.status_code == 403
+
+def test_miller_inventory_summary_and_movement_history():
+    from database import SessionLocal
+    from models import Item, StockMovement, User
+    from decimal import Decimal
+
+    owner_headers = get_headers("9999999999")
+    commissiondar_headers = get_headers("8888888888")
+
+    db = SessionLocal()
+    item = None
+    foreign_item = None
+
+    try:
+        owner = db.query(User).filter(
+            User.phone == "9999999999"
+        ).first()
+
+        commissiondar = db.query(User).filter(
+            User.phone == "8888888888"
+        ).first()
+
+        assert owner is not None
+        assert commissiondar is not None
+        assert owner.business_id != commissiondar.business_id
+
+        # Create a temporary grain variety for this Miller.
+        item = Item(
+            business_id=owner.business_id,
+            name=f"Inventory Test Paddy {uuid.uuid4().hex[:8]}",
+            category="Paddy",
+            unit="quintal",
+            is_active=True
+        )
+
+        db.add(item)
+        db.flush()
+
+        # Create a grain variety owned by the Commissiondar's
+        # separate business to verify account isolation.
+        foreign_item = Item(
+            business_id=commissiondar.business_id,
+            name=f"Foreign Test Grain {uuid.uuid4().hex[:8]}",
+            category="Paddy",
+            unit="quintal",
+            is_active=True
+        )
+
+        db.add(foreign_item)
+        db.flush()
+
+        # Miller movements:
+        # Purchase: +100
+        # Sale: -30
+        # Voided purchase: +50 (must be excluded)
+        # Adjustment: -5
+        movements = [
+            StockMovement(
+                business_id=owner.business_id,
+                item_id=item.id,
+                movement_type="purchase",
+                quantity=Decimal("100"),
+                created_by=owner.id,
+                is_void=False
+            ),
+            StockMovement(
+                business_id=owner.business_id,
+                item_id=item.id,
+                movement_type="sale",
+                quantity=Decimal("-30"),
+                created_by=owner.id,
+                is_void=False
+            ),
+            StockMovement(
+                business_id=owner.business_id,
+                item_id=item.id,
+                movement_type="purchase",
+                quantity=Decimal("50"),
+                created_by=owner.id,
+                is_void=True
+            ),
+            StockMovement(
+                business_id=owner.business_id,
+                item_id=item.id,
+                movement_type="adjustment",
+                quantity=Decimal("-5"),
+                created_by=owner.id,
+                is_void=False
+            )
+        ]
+
+        db.add_all(movements)
+        db.commit()
+
+        item_id = item.id
+        foreign_item_id = foreign_item.id
+
+    finally:
+        db.close()
+
+    try:
+        # 1. Verify inventory summary.
+        inventory_response = client.get(
+            "/api/inventory",
+            headers=owner_headers
+        )
+
+        assert inventory_response.status_code == 200, inventory_response.text
+
+        inventory = inventory_response.json()["inventory"]
+
+        grain = next(
+            row for row in inventory
+            if row["item_id"] == item_id
+        )
+
+        assert grain["received_quantity"] == 100.0
+        assert grain["dispatched_quantity"] == 30.0
+        assert grain["available_quantity"] == 65.0
+        assert grain["is_active"] is True
+
+        # 2. Verify movement history includes voided records.
+        history_response = client.get(
+            f"/api/inventory/{item_id}/movements",
+            headers=owner_headers
+        )
+
+        assert history_response.status_code == 200, history_response.text
+
+        history = history_response.json()
+
+        assert history["total"] == 4
+        assert len(history["movements"]) == 4
+
+        voided_movements = [
+            movement
+            for movement in history["movements"]
+            if movement["is_void"] is True
+        ]
+
+        assert len(voided_movements) == 1
+        assert voided_movements[0]["quantity"] == 50.0
+
+        # 3. Deactivate the grain directly and verify that
+        # inventory and history remain accessible.
+        db = SessionLocal()
+
+        try:
+            stored_item = db.query(Item).filter(
+                Item.id == item_id
+            ).first()
+
+            assert stored_item is not None
+
+            stored_item.is_active = False
+            db.commit()
+
+        finally:
+            db.close()
+
+        inactive_inventory_response = client.get(
+            "/api/inventory",
+            headers=owner_headers
+        )
+
+        assert inactive_inventory_response.status_code == 200
+
+        inactive_inventory = inactive_inventory_response.json()["inventory"]
+
+        inactive_grain = next(
+            row for row in inactive_inventory
+            if row["item_id"] == item_id
+        )
+
+        assert inactive_grain["is_active"] is False
+        assert inactive_grain["available_quantity"] == 65.0
+
+        inactive_history_response = client.get(
+            f"/api/inventory/{item_id}/movements",
+            headers=owner_headers
+        )
+
+        assert inactive_history_response.status_code == 200
+        assert inactive_history_response.json()["total"] == 4
+
+        # 4. Miller must not see another business's grain.
+        assert foreign_item_id not in [
+            row["item_id"]
+            for row in inactive_inventory
+        ]
+
+        foreign_history_response = client.get(
+            f"/api/inventory/{foreign_item_id}/movements",
+            headers=owner_headers
+        )
+
+        assert foreign_history_response.status_code == 404
+
+        # 5. Commissiondar must not access Miller inventory.
+        commissiondar_response = client.get(
+            "/api/inventory",
+            headers=commissiondar_headers
+        )
+
+        assert commissiondar_response.status_code == 403
+
+    finally:
+        # Remove only the temporary records created by this test.
+        db = SessionLocal()
+
+        try:
+            if item_id:
+                db.query(StockMovement).filter(
+                    StockMovement.item_id == item_id
+                ).delete(synchronize_session=False)
+
+                db.query(Item).filter(
+                    Item.id == item_id
+                ).delete(synchronize_session=False)
+
+            if foreign_item_id:
+                db.query(StockMovement).filter(
+                    StockMovement.item_id == foreign_item_id
+                ).delete(synchronize_session=False)
+
+                db.query(Item).filter(
+                    Item.id == foreign_item_id
+                ).delete(synchronize_session=False)
+
+            db.commit()
+
+        finally:
+            db.close()
