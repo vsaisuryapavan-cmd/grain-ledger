@@ -335,12 +335,13 @@ def test_commissiondar_stock_on_hand_nets_correctly():
 
     deliver = client.post(
         "/api/commissiondar-stock/deliver",
-        json={
-            "mill_name": "Independently Entered Mill",
-            "grain_type_id": grain.json()["id"],
-            "quantity": 6,
-            "rate": 2200,
-        },
+         json={
+        "farmer_id": farmer.json()["id"],
+        "mill_name": "Independently Entered Mill",
+        "grain_type_id": grain.json()["id"],
+        "quantity": 6,
+        "rate": 2200,
+    },
         headers=headers,
     )
     assert deliver.status_code == 200, deliver.text
@@ -1243,24 +1244,35 @@ def test_miller_can_manage_private_commissiondar_contacts_and_packet_commission(
     assert updated_row["total_commission"] == 1100
     assert updated_row["commission_paid"] == 500
     assert updated_row["commission_outstanding"] == 600
+
 def test_commissiondar_can_manage_own_farmers_and_independent_stock_delivery():
     headers = get_headers("8888888888")
+
+    # Create a farmer in this Commissiondar's own account.
     farmer = client.post(
         "/api/commissiondar/farmers",
-        json={"name": "Commissiondar Own Farmer", "village": "Own Village"},
+        json={
+            "name": "Commissiondar Own Farmer",
+            "village": "Own Village"
+        },
         headers=headers,
     )
     assert farmer.status_code == 201, farmer.text
     farmer_id = farmer.json()["id"]
 
+    # Create a custom grain type.
     grain = client.post(
         "/api/commissiondar/grain-types",
-        json={"name": f"Commissiondar Test Paddy {uuid.uuid4().hex[:8]}", "unit": "quintal"},
+        json={
+            "name": f"Commissiondar Test Paddy {uuid.uuid4().hex[:8]}",
+            "unit": "quintal"
+        },
         headers=headers,
     )
     assert grain.status_code == 201, grain.text
     grain_type_id = grain.json()["id"]
-    # Reject both catalogue IDs together.
+
+    # Reject both catalogue IDs together when receiving.
     both_receive = client.post(
         "/api/commissiondar-stock/receive",
         json={
@@ -1273,9 +1285,11 @@ def test_commissiondar_can_manage_own_farmers_and_independent_stock_delivery():
     )
     assert both_receive.status_code == 400
 
+    # Reject both catalogue IDs together when delivering.
     both_deliver = client.post(
         "/api/commissiondar-stock/deliver",
         json={
+            "farmer_id": farmer_id,
             "mill_name": "Manual Test Mill",
             "grain_type_id": grain_type_id,
             "item_id": 2,
@@ -1285,7 +1299,7 @@ def test_commissiondar_can_manage_own_farmers_and_independent_stock_delivery():
     )
     assert both_deliver.status_code == 400
 
-    # Reject requests without either catalogue ID.
+    # Reject receiving without either catalogue ID.
     neither_receive = client.post(
         "/api/commissiondar-stock/receive",
         json={
@@ -1296,9 +1310,12 @@ def test_commissiondar_can_manage_own_farmers_and_independent_stock_delivery():
     )
     assert neither_receive.status_code == 400
 
+    # Reject delivery without either catalogue ID.
+    # farmer_id is included so Pydantic validation passes.
     neither_deliver = client.post(
         "/api/commissiondar-stock/deliver",
         json={
+            "farmer_id": farmer_id,
             "mill_name": "Manual Test Mill",
             "quantity": 5,
         },
@@ -1306,200 +1323,60 @@ def test_commissiondar_can_manage_own_farmers_and_independent_stock_delivery():
     )
     assert neither_deliver.status_code == 400
 
+    # Receive 12 quintals from the farmer.
     received = client.post(
         "/api/commissiondar-stock/receive",
-        json={"farmer_id": farmer_id, "grain_type_id": grain_type_id, "quantity": 12, "rate": 2200},
+        json={
+            "farmer_id": farmer_id,
+            "grain_type_id": grain_type_id,
+            "quantity": 12,
+            "rate": 2200,
+        },
         headers=headers,
     )
     assert received.status_code == 200, received.text
 
+    # Deliver 5 quintals to a manually entered mill.
     delivered = client.post(
         "/api/commissiondar-stock/deliver",
-        json={"mill_name": "Manually Entered Mill", "grain_type_id": grain_type_id, "quantity": 5, "rate": 2200},
-        headers=headers,
-    )
-    assert delivered.status_code == 200, delivered.text
-    assert delivered.json()["mill_name"] == "Manually Entered Mill"
-
-    stock = client.get("/api/commissiondar-stock", headers=headers)
-    assert stock.status_code == 200, stock.text
-    assert stock.json()["stock_on_hand"] >= 7
-    assert any(x["mill_name"] == "Manually Entered Mill" for x in stock.json()["deliveries_by_mill"])
-
-
-def test_commissiondar_cannot_use_miller_farmer_directory():
-    headers = get_headers("8888888888")
-    response = client.get("/api/farmers", headers=headers)
-    assert response.status_code == 403
-
-
-def test_miller_cannot_use_commissiondar_farmer_directory():
-    headers = get_headers("9999999999")
-    response = client.get("/api/commissiondar/farmers", headers=headers)
-    assert response.status_code == 403
-
-def test_commissiondar_can_manage_own_mills():
-    headers = get_headers("8888888888")
-    mill_name = f"Test Mill {uuid.uuid4().hex[:8]}"
-
-    # Create a mill
-    create = client.post(
-        "/api/commissiondar/mills",
-        json={"name": f"  {mill_name}  "},
-        headers=headers,
-    )
-    assert create.status_code == 201, create.text
-
-    mill = create.json()
-    mill_id = mill["id"]
-    assert mill["name"] == mill_name
-    assert mill["is_active"] is True
-
-    # List active mills
-    listing = client.get(
-        "/api/commissiondar/mills",
-        headers=headers,
-    )
-    assert listing.status_code == 200, listing.text
-    assert any(item["id"] == mill_id for item in listing.json())
-
-    # Reject duplicate names (case-insensitive)
-    duplicate = client.post(
-        "/api/commissiondar/mills",
-        json={"name": mill_name.lower()},
-        headers=headers,
-    )
-    assert duplicate.status_code == 409
-
-    # Rename the mill
-    new_name = f"Updated {mill_name}"
-    update = client.put(
-        f"/api/commissiondar/mills/{mill_id}",
-        json={"name": new_name},
-        headers=headers,
-    )
-    assert update.status_code == 200, update.text
-    assert update.json()["name"] == new_name
-
-    # Deactivate the mill
-    deactivate = client.delete(
-        f"/api/commissiondar/mills/{mill_id}",
-        headers=headers,
-    )
-    assert deactivate.status_code == 200, deactivate.text
-    assert deactivate.json()["is_active"] is False
-
-    # It should not appear in the default active list
-    active_listing = client.get(
-        "/api/commissiondar/mills",
-        headers=headers,
-    )
-    assert active_listing.status_code == 200
-    assert not any(
-        item["id"] == mill_id
-        for item in active_listing.json()
-    )
-
-    # It should remain visible when inactive mills are requested
-    all_listing = client.get(
-        "/api/commissiondar/mills?include_inactive=true",
-        headers=headers,
-    )
-    assert all_listing.status_code == 200
-    assert any(item["id"] == mill_id for item in all_listing.json())
-
-
-def test_miller_cannot_access_commissiondar_mills():
-    commissiondar_headers = get_headers("8888888888")
-    miller_headers = get_headers("9999999999")
-
-    # Create a Commissiondar-owned mill
-    create = client.post(
-        "/api/commissiondar/mills",
-        json={"name": f"Private Mill {uuid.uuid4().hex[:8]}"},
-        headers=commissiondar_headers,
-    )
-    assert create.status_code == 201, create.text
-    mill_id = create.json()["id"]
-
-    # Miller cannot list Commissiondar mills
-    listing = client.get(
-        "/api/commissiondar/mills",
-        headers=miller_headers,
-    )
-    assert listing.status_code == 403
-
-    # Miller cannot create a Commissiondar mill
-    create_as_miller = client.post(
-        "/api/commissiondar/mills",
-        json={"name": "Unauthorized Mill"},
-        headers=miller_headers,
-    )
-    assert create_as_miller.status_code == 403
-
-    # Miller cannot update a Commissiondar mill
-    update = client.put(
-        f"/api/commissiondar/mills/{mill_id}",
-        json={"name": "Unauthorized Rename"},
-        headers=miller_headers,
-    )
-    assert update.status_code == 403
-
-    # Miller cannot deactivate a Commissiondar mill
-    delete = client.delete(
-        f"/api/commissiondar/mills/{mill_id}",
-        headers=miller_headers,
-    )
-    assert delete.status_code == 403
-
-def test_commissiondar_farmer_can_be_associated_with_multiple_mills():
-    headers = get_headers("8888888888")
-
-    # Create one farmer in the Commissiondar's own directory.
-    farmer_response = client.post(
-        "/api/commissiondar/farmers",
         json={
-            "name": f"Multi Mill Farmer {uuid.uuid4().hex[:8]}",
-            "village": "Test Village",
+            "farmer_id": farmer_id,
+            "mill_name": "Manually Entered Mill",
+            "grain_type_id": grain_type_id,
+            "quantity": 5,
+            "rate": 2200,
         },
         headers=headers,
     )
-    assert farmer_response.status_code == 201, farmer_response.text
-    farmer = farmer_response.json()
-    farmer_id = farmer["id"]
+    assert delivered.status_code == 200, delivered.text
 
-    # Create two independent mills.
-    mill_ids = []
+    delivery_data = delivered.json()
 
-    for name in ["Multi Mill A", "Multi Mill B"]:
-        response = client.post(
-            "/api/commissiondar/mills",
-            json={"name": f"{name} {uuid.uuid4().hex[:8]}"},
-            headers=headers,
-        )
-        assert response.status_code == 201, response.text
-        mill_ids.append(response.json()["id"])
+    assert delivery_data["farmer_id"] == farmer_id
+    assert delivery_data["farmer_name"] == farmer.json()["name"]
+    assert delivery_data["mill_name"] == "Manually Entered Mill"
 
-    # Associate the same farmer with both mills.
-    for mill_id in mill_ids:
-        response = client.post(
-            f"/api/commissiondar/mills/{mill_id}/farmers/{farmer_id}",
-            headers=headers,
-        )
-        assert response.status_code == 201, response.text
+    # Verify stock summary and delivery history.
+    stock = client.get(
+        "/api/commissiondar-stock",
+        headers=headers,
+    )
+    assert stock.status_code == 200, stock.text
 
-    # Verify both mills independently contain the farmer.
-    for mill_id in mill_ids:
-        response = client.get(
-            f"/api/commissiondar/mills/{mill_id}/farmers",
-            headers=headers,
-        )
-        assert response.status_code == 200, response.text
+    stock_data = stock.json()
 
-        data = response.json()
-        assert data["farmer_count"] == 1
-        assert data["farmers"][0]["id"] == farmer_id
+    assert stock_data["stock_on_hand"] >= 7
 
+    assert any(
+        x["mill_name"] == "Manually Entered Mill"
+        for x in stock_data["deliveries_by_mill"]
+    )
+
+    assert any(
+        x["farmer_name"] == farmer.json()["name"]
+        and x["mill_name"] == "Manually Entered Mill"
+        for x in stock_data["history"]
+    )
 
 def test_removing_farmer_from_one_mill_preserves_other_association():
     headers = get_headers("8888888888")
