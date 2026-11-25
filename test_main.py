@@ -23,19 +23,18 @@ client = TestClient(app)
 
 def get_token(phone):
     test_passwords = {
-        "9999999999": ("OwnerTest123!", "OwnerSecond123!"),
-        "8888888888": ("PartyTest123!", "PartySecond123!"),
-        "7093355518": ("AdminTest123!", "AdminSecond123!")
+        "9999999999": "OwnerTest123!",
+        "8888888888": "PartyTest123!",
+        "7093355518": "AdminTest123!"
     }
 
-    password, second_password = test_passwords[phone]
+    password = test_passwords[phone]
 
     response = client.post(
         "/api/login",
         json={
             "phone": phone,
-            "password": password,
-            "second_password": second_password
+            "password": password
         }
     )
 
@@ -78,10 +77,8 @@ def test_login_fails_for_unknown_phone():
         json={
             "phone": "0000000000",
             "password": "WrongTest123!",
-            "second_password": "WrongSecond123!"
         }
     )
-
     assert response.status_code == 401
 
 
@@ -374,7 +371,6 @@ def test_failed_login_is_logged():
         json={
             "phone": "0000000000",
             "password": "WrongTest123!",
-            "second_password": "WrongSecond123!"
         }
     )
 
@@ -594,6 +590,7 @@ def _cleanup_registered_account(phone):
         db.close()
 
 
+
 def test_miller_registration_creates_pending_account():
     from database import SessionLocal
     from models import User, Business
@@ -608,8 +605,7 @@ def test_miller_registration_creates_pending_account():
                 "name": "Pytest Miller",
                 "phone": phone,
                 "business_name": "Pytest Independent Mill",
-                "password": "MillerTest123!",
-                "second_password": "MillerSecond123!",
+                "password": "MillerTest123!"
             },
         )
 
@@ -624,14 +620,8 @@ def test_miller_registration_creates_pending_account():
             assert user is not None
             assert user.role == "owner"
             assert user.approval_status == "pending"
-            assert user.password_hash != "MillerTest123!"
-            assert user.second_password_hash != "MillerSecond123!"
-
             assert verify_password("MillerTest123!", user.password_hash)
-            assert verify_password(
-                "MillerSecond123!",
-                user.second_password_hash,
-            )
+            assert user.second_password_hash is None
 
             business = db.query(Business).filter(
                 Business.id == user.business_id
@@ -648,6 +638,7 @@ def test_miller_registration_creates_pending_account():
         _cleanup_registered_account(phone)
 
 
+
 def test_commissiondar_registration_creates_independent_pending_account():
     from database import SessionLocal
     from models import User, Business, Party
@@ -661,8 +652,7 @@ def test_commissiondar_registration_creates_independent_pending_account():
             json={
                 "name": "Pytest Commissiondar",
                 "phone": phone,
-                "password": "PartyTest123!",
-                "second_password": "PartySecond123!",
+                "password": "PartyTest123!"
             },
         )
 
@@ -678,14 +668,8 @@ def test_commissiondar_registration_creates_independent_pending_account():
             assert user.role == "party"
             assert user.approval_status == "pending"
             assert user.party_id is not None
-            assert user.password_hash != "PartyTest123!"
-            assert user.second_password_hash != "PartySecond123!"
-
             assert verify_password("PartyTest123!", user.password_hash)
-            assert verify_password(
-                "PartySecond123!",
-                user.second_password_hash,
-            )
+            assert user.second_password_hash is None
 
             business = db.query(Business).filter(
                 Business.id == user.business_id
@@ -710,6 +694,7 @@ def test_commissiondar_registration_creates_independent_pending_account():
         _cleanup_registered_account(phone)
 
 
+
 def test_miller_registration_rejects_duplicate_phone():
     response = client.post(
         "/api/register/miller",
@@ -718,7 +703,6 @@ def test_miller_registration_rejects_duplicate_phone():
             "phone": "9999999999",
             "business_name": "Duplicate Test Mill",
             "password": "MillerTest123!",
-            "second_password": "MillerSecond123!",
         },
     )
 
@@ -732,7 +716,6 @@ def test_commissiondar_registration_rejects_duplicate_phone():
             "name": "Duplicate Commissiondar",
             "phone": "8888888888",
             "password": "PartyTest123!",
-            "second_password": "PartySecond123!",
         },
     )
 
@@ -753,7 +736,6 @@ def test_admin_can_approve_pending_miller_registration():
                 "phone": phone,
                 "business_name": "Approval Test Mill",
                 "password": "MillerTest123!",
-                "second_password": "MillerSecond123!",
             },
         )
 
@@ -816,7 +798,6 @@ def test_admin_can_reject_pending_miller_registration():
                 "phone": phone,
                 "business_name": "Rejection Test Mill",
                 "password": "MillerTest123!",
-                "second_password": "MillerSecond123!",
             },
         )
 
@@ -858,7 +839,6 @@ def test_admin_can_reject_pending_miller_registration():
             json={
                 "phone": phone,
                 "password": "MillerTest123!",
-                "second_password": "MillerSecond123!",
             },
         )
 
@@ -880,7 +860,6 @@ def test_pending_registration_cannot_login():
                 "phone": phone,
                 "business_name": "Pending Login Test Mill",
                 "password": "MillerTest123!",
-                "second_password": "MillerSecond123!",
             },
         )
 
@@ -891,7 +870,7 @@ def test_pending_registration_cannot_login():
             json={
                 "phone": phone,
                 "password": "MillerTest123!",
-                "second_password": "MillerSecond123!",
+
             },
         )
 
@@ -984,7 +963,6 @@ def test_login_challenge_cannot_be_reused(monkeypatch):
         json={
             "phone": "9999999999",
             "password": "OwnerTest123!",
-            "second_password": "OwnerSecond123!"
         }
     )
 

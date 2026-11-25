@@ -153,8 +153,7 @@ class PaymentCreate(BaseModel):
 class LoginRequest(BaseModel):
     phone: str
     password: str
-    second_password: str
-
+    second_password: str | None = None
 
 class OTPVerifyRequest(BaseModel):
     challenge_id: str
@@ -166,14 +165,14 @@ class MillerRegisterRequest(BaseModel):
     phone: str = Field(min_length=10, max_length=20)
     business_name: str = Field(min_length=1, max_length=200)
     password: str
-    second_password: str
+    second_password: str | None = None
 
 
 class CommissiondarRegisterRequest(BaseModel):
     name: str = Field(min_length=1, max_length=150)
     phone: str = Field(min_length=10, max_length=20)
     password: str
-    second_password: str
+    second_password: str | None = None
 
 
 class LoanCreate(BaseModel):
@@ -373,12 +372,11 @@ def register_miller(
             detail="Name, phone and business name are required"
         )
 
-    if not data.password or not data.second_password:
-        raise HTTPException(
-            status_code=422,
-            detail="Both passwords are required"
-        )
-
+    if not data.password:
+     raise HTTPException(
+        status_code=422,
+        detail="Password is required"
+    )
     if db.query(User).filter(User.phone == phone).first():
         raise HTTPException(
             status_code=409,
@@ -399,7 +397,7 @@ def register_miller(
             phone=phone,
             role="owner",
             password_hash=hash_password(data.password),
-            second_password_hash=hash_password(data.second_password),
+            second_password_hash=None,
             approval_status="pending"
         )
         db.add(user)
@@ -439,11 +437,11 @@ def register_commissiondar(
             detail="Name and phone are required"
         )
 
-    if not data.password or not data.second_password:
-        raise HTTPException(
-            status_code=422,
-            detail="Both passwords are required"
-        )
+    if not data.password:
+      raise HTTPException(
+        status_code=422,
+        detail="Password is required"
+    )
 
     if db.query(User).filter(User.phone == phone).first():
         raise HTTPException(
@@ -477,7 +475,7 @@ def register_commissiondar(
             role="party",
             party_id=party.id,
             password_hash=hash_password(data.password),
-            second_password_hash=hash_password(data.second_password),
+            second_password_hash=None,
             approval_status="pending"
         )
         db.add(user)
@@ -507,6 +505,7 @@ def register_commissiondar(
 # Login
 # ---------------------------------------------------------------
 
+
 @app.post("/api/login")
 def login(
     data: LoginRequest,
@@ -516,12 +515,14 @@ def login(
         User.phone == data.phone
     ).first()
 
+    # 1. Verify user exists
     if not user:
         raise HTTPException(
             status_code=401,
             detail="Invalid phone number or password"
         )
 
+    # 2. Verify the single password
     if not user.password_hash or not verify_password(
         data.password,
         user.password_hash
@@ -531,15 +532,7 @@ def login(
             detail="Invalid phone number or password"
         )
 
-    if not user.second_password_hash or not verify_password(
-        data.second_password,
-        user.second_password_hash
-    ):
-        raise HTTPException(
-            status_code=401,
-            detail="Invalid phone number or password"
-        )
-
+    # 3. Check account approval status
     if user.approval_status == "pending":
         raise HTTPException(
             status_code=403,
@@ -558,13 +551,13 @@ def login(
             detail="Your account cannot log in"
         )
 
-    # Invalidate previous unused challenges for this user
+    # 4. Invalidate previous unused challenges for this user
     db.query(LoginChallenge).filter(
         LoginChallenge.user_id == user.id,
         LoginChallenge.used == False
     ).delete(synchronize_session=False)
 
-    # Create a new persistent login challenge
+    # 5. Create a new persistent login challenge
     challenge_id = secrets.token_urlsafe(32)
 
     challenge = LoginChallenge(
@@ -586,9 +579,10 @@ def login(
         )
 
     return {
-        "message": "Passwords verified. MSG91 OTP required.",
+        "message": "Password verified. MSG91 OTP required.",
         "challenge_id": challenge_id
     }
+
 
 
 @app.post("/api/verify-otp")
