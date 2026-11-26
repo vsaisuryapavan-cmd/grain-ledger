@@ -1,23 +1,21 @@
-import httpx
-import os
 from datetime import datetime, timedelta, timezone
-
-from jose import jwt, JWTError
-from fastapi import Depends, HTTPException
-from fastapi.security import HTTPBearer
-from sqlalchemy.orm import Session
-from dotenv import load_dotenv
-from pwdlib import PasswordHash
-
-from database import get_db
-from models import User
-
-import secrets
 import hashlib
 import hmac
+import os
+import secrets
 
+from fastapi import HTTPException
+from fastapi.security import HTTPBearer
+import httpx
+from jose import jwt
+from pwdlib import PasswordHash
 
-load_dotenv()
+from app.core.config import (
+    ACCESS_TOKEN_EXPIRE_MINUTES,
+    ALGORITHM,
+    SECRET_KEY,
+)
+from app.models.core import User
 
 password_hash = PasswordHash.recommended()
 
@@ -30,14 +28,13 @@ def verify_password(plain_password: str, hashed_password: str) -> bool:
     return password_hash.verify(plain_password, hashed_password)
 
 
-
 def verify_msg91_access_token(access_token: str) -> str:
     authkey = os.getenv("MSG91_AUTHKEY")
 
     if not authkey:
         raise HTTPException(
             status_code=503,
-            detail="MSG91 authentication is not configured"
+            detail="MSG91 authentication is not configured",
         )
 
     try:
@@ -45,13 +42,13 @@ def verify_msg91_access_token(access_token: str) -> str:
             "https://control.msg91.com/api/v5/widget/verifyAccessToken",
             json={
                 "authkey": authkey,
-                "access-token": access_token
+                "access-token": access_token,
             },
             headers={
                 "Accept": "application/json",
-                "Content-Type": "application/json"
+                "Content-Type": "application/json",
             },
-            timeout=10
+            timeout=10,
         )
 
         response.raise_for_status()
@@ -60,13 +57,13 @@ def verify_msg91_access_token(access_token: str) -> str:
     except (httpx.HTTPError, ValueError):
         raise HTTPException(
             status_code=503,
-            detail="Unable to verify OTP with MSG91"
+            detail="Unable to verify OTP with MSG91",
         )
 
     if not isinstance(result, dict) or result.get("type") != "success":
         raise HTTPException(
             status_code=401,
-            detail="MSG91 OTP verification failed"
+            detail="MSG91 OTP verification failed",
         )
 
     identifier = result.get("message")
@@ -74,11 +71,10 @@ def verify_msg91_access_token(access_token: str) -> str:
     if not isinstance(identifier, str) or not identifier.strip():
         raise HTTPException(
             status_code=401,
-            detail="MSG91 returned an invalid verification result"
+            detail="MSG91 returned an invalid verification result",
         )
 
     return identifier.strip()
-
 
 
 OTP_EXPIRY_MINUTES = 5
@@ -103,7 +99,7 @@ def create_otp_challenge(user_id: int) -> str:
     otp_hash = hmac.new(
         OTP_HASH_KEY,
         f"{challenge_id}:{otp}".encode(),
-        hashlib.sha256
+        hashlib.sha256,
     ).hexdigest()
 
     OTP_CHALLENGES[challenge_id] = {
@@ -111,7 +107,7 @@ def create_otp_challenge(user_id: int) -> str:
         "otp_hash": otp_hash,
         "expires_at": datetime.now(timezone.utc)
         + timedelta(minutes=OTP_EXPIRY_MINUTES),
-        "attempts": 0
+        "attempts": 0,
     }
 
     print(f"\n[DEVELOPMENT OTP] {otp}\n")
@@ -136,12 +132,12 @@ def verify_otp(challenge_id: str, submitted_otp: str) -> bool:
     submitted_hash = hmac.new(
         OTP_HASH_KEY,
         f"{challenge_id}:{submitted_otp}".encode(),
-        hashlib.sha256
+        hashlib.sha256,
     ).hexdigest()
 
     if not hmac.compare_digest(
         challenge["otp_hash"],
-        submitted_hash
+        submitted_hash,
     ):
         challenge["attempts"] += 1
 
@@ -154,14 +150,6 @@ def verify_otp(challenge_id: str, submitted_otp: str) -> bool:
 
     return True
 
-
-SECRET_KEY = os.getenv("SECRET_KEY")
-
-if not SECRET_KEY:
-    raise RuntimeError("SECRET_KEY is not configured")
-
-ALGORITHM = "HS256"
-ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24 * 7
 
 oauth2_scheme = HTTPBearer()
 
@@ -183,53 +171,5 @@ def create_access_token(user: User) -> str:
     return jwt.encode(
         payload,
         SECRET_KEY,
-        algorithm=ALGORITHM
+        algorithm=ALGORITHM,
     )
-
-
-def get_current_user(
-    credentials=Depends(oauth2_scheme),
-    db: Session = Depends(get_db)
-) -> User:
-
-    token = credentials.credentials
-
-    credentials_exception = HTTPException(
-        status_code=401,
-        detail="Could not validate credentials",
-        headers={"WWW-Authenticate": "Bearer"}
-    )
-
-    try:
-        payload = jwt.decode(
-            token,
-            SECRET_KEY,
-            algorithms=[ALGORITHM]
-        )
-
-        user_id = payload.get("sub")
-
-        if user_id is None:
-            raise credentials_exception
-
-        user_id = int(user_id)
-
-    except (JWTError, ValueError, TypeError):
-        raise credentials_exception
-
-    user = (
-        db.query(User)
-        .filter(User.id == user_id)
-        .first()
-    )
-
-    if user is None:
-        raise credentials_exception
-
-    if user.approval_status != "approved":
-        raise HTTPException(
-            status_code=403,
-            detail="Your account is not approved"
-        )
-
-    return user

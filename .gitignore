@@ -2,6 +2,12 @@
 .env
 .env.*
 !.env.example
+!.env.test.example
+
+# Database dumps and local backups
+*.dump
+*.sql.bak
+backups/
 
 # Python virtual environments
 .venv/
@@ -11,16 +17,3 @@ venv/
 __pycache__/
 *.py[cod]
 .pytest_cache/
-otp_manual.py
-
-setup_existing_passwords.py
-
-setup_test_passwords.py
-
-test_password.py
-
-otp_manual.py
-
-setup_existing_passwords.py
-
-setup_test_passwords.py

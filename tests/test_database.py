@@ -1,10 +1,10 @@
-import sys
-from sqlalchemy.engine import make_url
 import os
+import sys
+
 from dotenv import load_dotenv
 from sqlalchemy import create_engine
+from sqlalchemy.engine import make_url
 from sqlalchemy.orm import sessionmaker
-from database import Base
 
 # Load the separate testing environment
 load_dotenv(".env.test", override=True)
@@ -24,18 +24,18 @@ if TEST_DATABASE_URL.startswith("postgresql://"):
     TEST_DATABASE_URL = TEST_DATABASE_URL.replace(
         "postgresql://",
         "postgresql+psycopg2://",
-        1
+        1,
     )
 
 test_engine = create_engine(
     TEST_DATABASE_URL,
-    pool_pre_ping=True
+    pool_pre_ping=True,
 )
 
 TestSessionLocal = sessionmaker(
     autocommit=False,
     autoflush=False,
-    bind=test_engine
+    bind=test_engine,
 )
 
 

@@ -1,0 +1,60 @@
+broker_commissions | id | bigint | NO
+broker_commissions | business_id | bigint | NO
+broker_commissions | commissiondar_id | bigint | NO
+broker_commissions | farmer_id | bigint | YES
+broker_commissions | movement_id | bigint | YES
+broker_commissions | commission_amount | numeric | NO
+broker_commissions | is_paid | boolean | NO
+broker_commissions | created_at | timestamp with time zone | NO
+broker_commissions | is_void | boolean | NO
+commissiondar_stock_movements | id | bigint | NO
+commissiondar_stock_movements | commissiondar_id | bigint | NO
+commissiondar_stock_movements | farmer_id | bigint | YES
+commissiondar_stock_movements | business_id | bigint | YES
+commissiondar_stock_movements | item_id | bigint | NO
+commissiondar_stock_movements | movement_type | character varying | NO
+commissiondar_stock_movements | quantity | numeric | NO
+commissiondar_stock_movements | rate | numeric | YES
+commissiondar_stock_movements | movement_id | bigint | YES
+commissiondar_stock_movements | created_at | timestamp with time zone | YES
+commissiondar_stock_movements | is_void | boolean | NO
+commissiondar_stock_movements | grain_type_id | bigint | YES
+grain_types | id | bigint | NO
+grain_types | name | text | NO
+grain_types | unit | text | NO
+grain_types | owner_business_id | bigint | YES
+grain_types | created_by_user_id | bigint | YES
+grain_types | created_at | timestamp with time zone | NO
+grain_types | is_active | boolean | NO
+issue_reports | id | bigint | NO
+issue_reports | user_id | bigint | YES
+issue_reports | description | character varying | NO
+issue_reports | status | character varying | NO
+issue_reports | created_at | timestamp with time zone | YES
+login_logs | id | bigint | NO
+login_logs | phone | character varying | NO
+login_logs | user_id | bigint | YES
+login_logs | success | boolean | NO
+login_logs | created_at | timestamp with time zone | YES
+parties | id | bigint | NO
+parties | business_id | bigint | NO
+parties | name | text | NO
+parties | phone | text | YES
+parties | village | text | YES
+parties | party_type | text | NO
+parties | opening_balance | numeric | NO
+parties | is_active | boolean | NO
+parties | created_at | timestamp with time zone | NO
+stock_movements | id | bigint | NO
+stock_movements | business_id | bigint | NO
+stock_movements | item_id | bigint | NO
+stock_movements | party_id | bigint | YES
+stock_movements | movement_type | text | NO
+stock_movements | quantity | numeric | NO
+stock_movements | rate | numeric | YES
+stock_movements | moisture_pct | numeric | YES
+stock_movements | moved_at | timestamp with time zone | NO
+stock_movements | note | text | YES
+stock_movements | created_by | bigint | YES
+stock_movements | broker_id | bigint | YES
+stock_movements | is_void | boolean | NO

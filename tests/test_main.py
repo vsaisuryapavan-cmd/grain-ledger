@@ -1,4 +1,5 @@
 import main
+import app.core.security as _security_module
 import pytest
 import uuid
 from fastapi.testclient import TestClient
@@ -8,7 +9,7 @@ from main import app
 @pytest.fixture(autouse=True)
 def mock_msg91_verification(monkeypatch):
     monkeypatch.setattr(
-        main,
+        _security_module,
         "verify_msg91_access_token",
         lambda access_token: access_token.split(":", 1)[1]
     )
@@ -496,7 +497,7 @@ def test_token_signed_with_wrong_secret_returns_401():
 def test_expired_token_returns_401():
     from jose import jwt
     from datetime import datetime, timedelta, timezone
-    from auth import SECRET_KEY, ALGORITHM
+    from app.core.config import SECRET_KEY, ALGORITHM
 
     token = jwt.encode(
         {
@@ -521,7 +522,7 @@ def test_expired_token_returns_401():
 def test_token_without_user_id_returns_401():
     from jose import jwt
     from datetime import datetime, timedelta, timezone
-    from auth import SECRET_KEY, ALGORITHM
+    from app.core.config import SECRET_KEY, ALGORITHM
 
     token = jwt.encode(
         {
@@ -555,8 +556,8 @@ def _new_test_phone():
 
 def _cleanup_registered_account(phone):
     """Remove only the account created by the current test."""
-    from database import SessionLocal
-    from models import User, Business, Party
+    from app.core.database import SessionLocal
+    from app.models import User, Business, Party
 
     db = SessionLocal()
 
@@ -592,9 +593,9 @@ def _cleanup_registered_account(phone):
 
 
 def test_miller_registration_creates_pending_account():
-    from database import SessionLocal
-    from models import User, Business
-    from auth import verify_password
+    from app.core.database import SessionLocal
+    from app.models import User, Business
+    from app.core.security import verify_password
 
     phone = _new_test_phone()
 
@@ -640,9 +641,9 @@ def test_miller_registration_creates_pending_account():
 
 
 def test_commissiondar_registration_creates_independent_pending_account():
-    from database import SessionLocal
-    from models import User, Business, Party
-    from auth import verify_password
+    from app.core.database import SessionLocal
+    from app.models import User, Business, Party
+    from app.core.security import verify_password
 
     phone = _new_test_phone()
 
@@ -723,8 +724,8 @@ def test_commissiondar_registration_rejects_duplicate_phone():
 
 
 def test_admin_can_approve_pending_miller_registration():
-    from database import SessionLocal
-    from models import User
+    from app.core.database import SessionLocal
+    from app.models import User
 
     phone = _new_test_phone()
 
@@ -785,8 +786,8 @@ def test_admin_can_approve_pending_miller_registration():
 
 
 def test_admin_can_reject_pending_miller_registration():
-    from database import SessionLocal
-    from models import User
+    from app.core.database import SessionLocal
+    from app.models import User
 
     phone = _new_test_phone()
 
@@ -952,7 +953,7 @@ def test_admin_dashboard_summary_is_admin_only():
 def test_login_challenge_cannot_be_reused(monkeypatch):
     # Mock MSG91 verification for this test only
     monkeypatch.setattr(
-        main,
+        _security_module,
         "verify_msg91_access_token",
         lambda access_token: "9999999999"
     )
@@ -1890,8 +1891,8 @@ def test_commissiondar_cannot_access_miller_grain_management():
     assert create_response.status_code == 403
 
 def test_miller_inventory_summary_and_movement_history():
-    from database import SessionLocal
-    from models import Item, StockMovement, User
+    from app.core.database import SessionLocal
+    from app.models import Item, StockMovement, User
     from decimal import Decimal
 
     owner_headers = get_headers("9999999999")
